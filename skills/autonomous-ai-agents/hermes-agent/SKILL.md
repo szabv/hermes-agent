@@ -1,7 +1,7 @@
 ---
 name: hermes-agent
 description: "Configure, extend, or contribute to Hermes Agent."
-version: 3.0.0
+version: 3.1.0
 author: Hermes Agent + Teknium
 license: MIT
 metadata:
@@ -13,78 +13,70 @@ metadata:
 
 # Hermes Agent
 
-Hermes Agent is an open-source AI agent framework by Nous Research that runs in your terminal, messaging platforms, and IDEs. It belongs to the same category as Claude Code (Anthropic), Codex (OpenAI), and OpenClaw — autonomous coding and task-execution agents that use tool calling to interact with your system. Hermes works with any LLM provider (OpenRouter, Anthropic, OpenAI, DeepSeek, local models, and 15+ others) and runs on Linux, macOS, and WSL.
+Hermes Agent is the open-source AI agent framework by Nous Research. Same category as Claude Code, Codex, and OpenCode — autonomous coding and task-execution that uses tool calling to interact with your system. Works with any LLM provider (OpenRouter, Anthropic, OpenAI, DeepSeek, Nous Portal, local models, 15+ others). Runs on Linux, macOS, WSL.
 
-What makes Hermes different:
+What's distinctive:
 
-- **Self-improving through skills** — Hermes learns from experience by saving reusable procedures as skills. When it solves a complex problem, discovers a workflow, or gets corrected, it can persist that knowledge as a skill document that loads into future sessions. Skills accumulate over time, making the agent better at your specific tasks and environment.
-- **Persistent memory across sessions** — remembers who you are, your preferences, environment details, and lessons learned. Pluggable memory backends (built-in, Honcho, Mem0, and more) let you choose how memory works.
-- **Multi-platform gateway** — the same agent runs on Telegram, Discord, Slack, WhatsApp, Signal, Matrix, Email, and 10+ other platforms with full tool access, not just chat.
-- **Provider-agnostic** — swap models and providers mid-workflow without changing anything else. Credential pools rotate across multiple API keys automatically.
-- **Profiles** — run multiple independent Hermes instances with isolated configs, sessions, skills, and memory.
-- **Extensible** — plugins, MCP servers, custom tools, webhook triggers, cron scheduling, and the full Python ecosystem.
+- **Self-improving through skills** — saves reusable procedures as skill documents that load into future sessions. Skills accumulate over time.
+- **Persistent memory across sessions** — pluggable backends (built-in, Honcho, Mem0).
+- **Multi-platform gateway** — same agent runs on 21+ messaging platforms (Telegram, Discord, Slack, WhatsApp, Signal, Matrix, Email, SMS, …) with full tool access.
+- **Provider-agnostic** — swap models mid-workflow. Credential pools rotate keys automatically.
+- **Profiles** — multiple isolated Hermes instances on the same machine.
+- **Extensible** — plugins, MCP servers, custom tools, webhook triggers, cron, Python ecosystem.
 
-**This skill is a navigation index.** The complete documentation lives in `website/docs/` inside the repo. When the user asks about Hermes configuration, extension, or troubleshooting, fetch only the relevant doc — never load everything.
+## Capability Inventory
 
-## Doc Tree & Quick Mapping
+Things Hermes can do. If the user asks about any of these, that capability exists — go look up the details, don't say "I can't."
 
-Docs live at `~/.hermes/hermes-agent/website/docs/`. Read them locally with `read_file`. Paths are relative to that directory:
+- **Slash commands in-session:** /help, /model, /reset, /new, /resume, /stop, /skills, /memory, /approve, /deny, /queue, /status, /copy, /paste, /recap, /restart (gateway), and more. Full list in docs.
+- **Spawn additional Hermes instances:** `hermes chat`, `hermes -p <profile>`, delegated subagents via `delegate_task`, multi-agent kanban workers.
+- **Durable / background systems:** cron jobs (recurring or one-shot), webhook subscriptions (event-driven runs), background terminal tasks with `notify_on_complete`, gateway sessions that outlive the CLI.
+- **Voice & vision:** TTS providers (Edge, OpenAI, ElevenLabs, MiniMax, xAI, custom), STT/voice mode, image generation, video generation, vision analysis on images.
+- **Browser & web:** Browserbase / Camofox browser automation, Firecrawl web search/extract, MCP-based browsers.
+- **Security defaults:** secret redaction on by default, approval prompts for destructive commands, `--yolo` to bypass, credential pools for key rotation, sandboxed terminal backends (Docker, Modal, SSH, Daytona, Singularity).
+- **Platforms / integrations:** Telegram, Discord, Slack, WhatsApp, Signal, Matrix, Mattermost, Email, SMS, Home Assistant, DingTalk, WeCom, WeChat, Feishu, QQ, BlueBubbles, Yuanbao, generic Webhooks, API server.
+- **Provider plugins:** memory, image_gen, context_engine, model providers — third-party drop-ins under `~/.hermes/plugins/` or pip-installed.
+- **MCP:** native MCP client, can connect to any MCP server.
 
-| User asks about... | Read |
-|---|---|
-| Install, setup, update | `getting-started/quickstart.md`, `getting-started/installation.md`, `getting-started/updating.md` |
-| Model/provider config | `user-guide/configuring-models.md`, `integrations/providers.md` |
-| Config (yaml, env, tools) | `user-guide/configuration.md` |
-| CLI commands, flags, spawning | `reference/cli-commands.md`, `user-guide/cli.md` |
-| Gateway, messaging platforms | `user-guide/messaging/index.md` |
-| Telegram setup, topics, DM | `user-guide/messaging/telegram.md` |
-| Other platforms (Discord, Slack, etc.) | `user-guide/messaging/<platform>.md` |
-| Creating/adding tools | `developer-guide/adding-tools.md` |
-| Skills system | `user-guide/features/skills.md`, `developer-guide/creating-skills.md` |
-| Memory system | `user-guide/features/memory.md`, `user-guide/features/memory-providers.md` |
-| Cron jobs | `user-guide/features/cron.md`, `guides/cron-troubleshooting.md` |
-| MCP servers | `user-guide/features/mcp.md`, `reference/mcp-config-reference.md` |
-| Profiles | `user-guide/profiles.md`, `reference/profile-commands.md` |
-| Voice, TTS, STT | `user-guide/features/voice-mode.md`, `user-guide/features/tts.md` |
-| Browser automation | `user-guide/features/browser.md` |
-| Delegation, subagents | `user-guide/features/delegation.md` |
-| Security, secrets, redaction | `user-guide/security.md`, `user-guide/secrets/` |
-| Slash commands (in-session) | `reference/slash-commands.md` |
-| All tools reference | `reference/tools-reference.md`, `reference/toolsets-reference.md` |
-| Troubleshooting | `reference/faq.md` |
-| Environment variables | `reference/environment-variables.md` |
-| Available models | `reference/model-catalog.md` |
-| Developing, contributing | `developer-guide/contributing.md`, `developer-guide/architecture.md` |
-| Agent loop internals | `developer-guide/agent-loop.md` |
-| Context compression, caching | `developer-guide/context-compression-and-caching.md` |
-| Provider plugins | `developer-guide/model-provider-plugin.md` |
+## Full Docs
 
-**How to read:** Use `read_file` with these paths relative to `~/.hermes/hermes-agent/website/docs/`. Only read the specific doc(s) relevant to the question. If the doc doesn't answer it, check `reference/faq.md` next. Fallback: fetch from `https://raw.githubusercontent.com/NousResearch/hermes-agent/main/website/docs/` if the local repo isn't available.
+Complete documentation ships in the repo at `~/.hermes/hermes-agent/website/docs/` and publishes to https://hermes-agent.nousresearch.com/docs/.
 
-**Docs site:** https://hermes-agent.nousresearch.com/docs/
+Two pre-built bundles ride alongside, regenerated on every docs build:
 
-**How to fetch efficiently:**
-- Scan section headers before reading a full doc to narrow down what you actually need
-- Trim large docs — some exceed 200KB; use offset/limit to read only relevant sections
-- Browse the directory tree on GitHub when the mapping above doesn't cover a topic
+```
+~/.hermes/hermes-agent/website/static/llms.txt          short curated index, one link per page
+~/.hermes/hermes-agent/website/static/llms-full.txt     every doc concatenated (~2MB, ~48K lines)
+```
+
+Same files publish at https://hermes-agent.nousresearch.com/docs/llms.txt and `/docs/llms-full.txt`.
+
+**How to use them:**
+
+1. **Targeted lookup** — `search_files` with a regex on `llms-full.txt` to find the section that answers a specific question. Faster than reading individual doc files, and you get the surrounding context for free.
+2. **Browse the index** — `read_file` on `llms.txt` (135 lines) when you need to find which doc covers a topic before drilling in.
+3. **Read a specific doc** — `read_file` on the page under `website/docs/` if you know exactly which one you need.
+4. **Fallback when the repo isn't cloned locally** — fetch the bundle URLs above with `web_extract`.
+
+Don't read `llms-full.txt` in full — it's a grep target, not a system prompt.
 
 ## Key Paths
 
 ```
 ~/.hermes/config.yaml       Main configuration
-~/.hermes/.env              API keys and secrets
+~/.hermes/.env              API keys and secrets only
 ~/.hermes/SOUL.md           Agent persona
 ~/.hermes/skills/           Installed skills
 ~/.hermes/sessions/         Session transcripts
-~/.hermes/logs/             Gateway and error logs
+~/.hermes/logs/             Gateway and error logs (agent.log, errors.log, gateway.log)
 ~/.hermes/hermes-agent/     Source code (if git-installed)
 ```
 
 ## Key Rules
 
-- **Never break prompt caching** — don't change context, tools, or system prompt mid-conversation
-- **Message role alternation** — never two assistant or two user messages in a row
-- **Use `get_hermes_home()`** from `hermes_constants` for all paths (profile-safe), never hardcode `~/.hermes`
-- **Config values go in `config.yaml`**, secrets and API keys go in `.env`
-- **New tools need a `check_fn`** so they only appear when requirements are met
-- **Don't fabricate user information** — never assume or invent facts about the user that aren't in memory. If unsure, verify. When asked about the current model or config, read `config.yaml` directly — it's the runtime truth, memory can be stale.
+- **Never break prompt caching** — don't change context, tools, or system prompt mid-conversation.
+- **Message role alternation** — never two assistant or two user messages in a row.
+- **Use `get_hermes_home()`** from `hermes_constants` for all paths (profile-safe), never hardcode `~/.hermes`.
+- **Config values go in `config.yaml`, secrets and API keys go in `.env`** — never add behavioral env vars.
+- **New tools need a `check_fn`** so they only appear when requirements are met.
+- **Don't fabricate user information** — when asked about current model, provider, or config, read `config.yaml` directly. Memory can be stale; config.yaml is runtime truth.

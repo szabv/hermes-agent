@@ -49,8 +49,8 @@ Click **Show auxiliary** to reveal the eight task slots:
 
 Every auxiliary task defaults to `auto`, which uses a resolution chain starting with your main provider:
 
-- **Text tasks** (compression, session_search, web_extract, approval, MCP, skills_hub): main provider → OpenRouter → Nous Portal → custom endpoint → Anthropic → direct API-key providers.
-- **Vision tasks**: main provider (if vision-capable) → OpenRouter → Nous Portal → Anthropic → custom endpoint.
+- **Text tasks** (compression, session_search, web_extract, approval, MCP, skills_hub): main provider → OpenRouter → Nous Portal → custom endpoint → direct API-key providers (Anthropic, DeepSeek, etc.).
+- **Vision tasks**: main provider (if vision-capable) → OpenRouter → Nous Portal.
 
 To force auxiliaries to use a specific provider, set it explicitly:
 ```bash
