@@ -29,6 +29,30 @@ from tools.registry import tool_error
 logger = logging.getLogger(__name__)
 
 
+def _coerce_memory_content(content: Any) -> str:
+    """Flatten SDK/message content parts into text suitable for Honcho storage."""
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, bytes):
+        return content.decode("utf-8", errors="replace")
+    if isinstance(content, (int, float, bool)):
+        return str(content)
+    if isinstance(content, dict):
+        for key in ("text", "content", "value"):
+            if key in content:
+                return _coerce_memory_content(content.get(key))
+        try:
+            return json.dumps(content, ensure_ascii=False, default=str)
+        except Exception:
+            return str(content)
+    if isinstance(content, (list, tuple)):
+        parts = [_coerce_memory_content(part).strip() for part in content]
+        return "\n".join(part for part in parts if part)
+    return str(content)
+
+
 # ---------------------------------------------------------------------------
 # Tool schemas (moved from tools/honcho_tools.py)
 # ---------------------------------------------------------------------------
@@ -1128,8 +1152,8 @@ class HonchoMemoryProvider(MemoryProvider):
             return
 
         msg_limit = self._config.message_max_chars if self._config else 25000
-        clean_user_content = sanitize_context(user_content or "").strip()
-        clean_assistant_content = sanitize_context(assistant_content or "").strip()
+        clean_user_content = sanitize_context(_coerce_memory_content(user_content)).strip()
+        clean_assistant_content = sanitize_context(_coerce_memory_content(assistant_content)).strip()
 
         def _sync():
             try:
