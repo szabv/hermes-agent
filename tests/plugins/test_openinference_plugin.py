@@ -8,9 +8,11 @@ contract independent of the openinference-semantic-conventions package.
 from __future__ import annotations
 
 import importlib
+import json
 import logging
 import sys
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -307,6 +309,55 @@ class TestProviderSetup:
         mod._get_tracer()
         assert picked.get("http")
 
+    def test_concurrent_first_call_builds_one_provider(self, monkeypatch):
+        _clear_otel_env(monkeypatch)
+        monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "http://localhost:4318/v1/traces")
+        mod = _fresh_plugin()
+        created = {"providers": 0, "tracers": []}
+
+        class FakeProvider:
+            def __init__(self, resource=None):
+                self.resource = resource
+                self.processors = []
+                created["providers"] += 1
+                time.sleep(0.01)
+
+            def add_span_processor(self, p):
+                self.processors.append(p)
+
+            def get_tracer(self, *a, **k):
+                tracer = FakeTracer()
+                created["tracers"].append(tracer)
+                return tracer
+
+        class FakeResource:
+            @staticmethod
+            def create(attrs):
+                return {"resource_attrs": attrs}
+
+        monkeypatch.setattr(mod, "_otel_trace", FakeOtelTrace, raising=False)
+        monkeypatch.setattr(mod, "TracerProvider", FakeProvider, raising=False)
+        monkeypatch.setattr(mod, "Resource", FakeResource, raising=False)
+        monkeypatch.setattr(mod, "BatchSpanProcessor", lambda exp: ("bsp", exp), raising=False)
+        monkeypatch.setattr(mod, "_OTLPHTTPSpanExporter", lambda: "http-exp", raising=False)
+
+        results = []
+        result_lock = threading.Lock()
+
+        def worker():
+            tracer = mod._get_tracer()
+            with result_lock:
+                results.append(tracer)
+
+        threads = [threading.Thread(target=worker) for _ in range(12)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        assert created["providers"] == 1
+        assert len({id(result) for result in results}) == 1
+
 
 # ---------------------------------------------------------------------------
 # 6. Span shaping (literal OpenInference keys).
@@ -333,7 +384,7 @@ class TestSpanShaping:
         assert llm.attributes["llm.provider"] == "anthropic"
         assert llm.attributes["llm.input_messages.0.message.role"] == "user"
         assert llm.attributes["llm.input_messages.0.message.content"] == "hello"
-        assert llm.attributes["input.value"]
+        assert llm.attributes["input.value"] == '[{"role": "user", "content": "hello"}]'
 
         class _Msg:
             content = "hi there"
@@ -373,7 +424,7 @@ class TestSpanShaping:
         mod.on_post_tool_call(tool_name="read_file", args={"path": "x.py"}, result={"content": "ok"},
                               task_id="t", session_id="s", tool_call_id="call-9", duration_ms=42)
         assert tool.attributes["tool.id"] == "call-9"
-        assert tool.attributes["output.value"]
+        assert tool.attributes["output.value"] == '{"content": "ok"}'
         assert tool.attributes["duration_ms"] == 42
         assert tool.ended is True
 
@@ -402,6 +453,43 @@ class TestSpanShaping:
         assert llm.attributes["llm.output_messages.0.message.tool_calls.0.tool_call.function.arguments"] == '{"q": "x"}'
         # tool call present ⇒ root stays open.
         assert "t" in mod._TRACE_STATE
+
+    def test_malformed_tool_calls_do_not_raise_or_leak_spans(self, monkeypatch):
+        _clear_otel_env(monkeypatch)
+        mod = _fresh_plugin()
+        tracer = _install_fake_tracer(mod)
+        mod.on_pre_api_request(
+            task_id="t", session_id="s", api_call_count=1,
+            request_messages=[{"role": "assistant", "tool_calls": 5}],
+        )
+        root, llm = tracer.spans[0], tracer.spans[1]
+
+        class _Msg:
+            content = None
+            tool_calls = 5
+
+        mod.on_post_api_request(
+            task_id="t", session_id="s", api_call_count=1,
+            assistant_message=_Msg(), assistant_content_chars=0,
+            assistant_tool_call_count=0,
+        )
+        assert llm.ended is True
+        assert root.ended is True
+        assert mod._TRACE_STATE == {}
+
+    def test_input_message_capture_is_bounded(self, monkeypatch):
+        _clear_otel_env(monkeypatch)
+        mod = _fresh_plugin()
+        tracer = _install_fake_tracer(mod)
+        messages = [{"role": "user", "content": str(i)} for i in range(55)]
+        mod.on_pre_api_request(
+            task_id="t", session_id="s", api_call_count=1,
+            request_messages=messages,
+        )
+        llm = tracer.spans[1]
+        assert llm.attributes["llm.input_messages.0.message.content"] == "5"
+        assert "llm.input_messages.50.message.role" not in llm.attributes
+        assert json.loads(llm.attributes["input.value"])[0]["content"] == "5"
 
 
 # ---------------------------------------------------------------------------
@@ -525,6 +613,25 @@ class TestRetry:
 # 11. Sweep-close on session boundary + agent-level tool (pre, no post).
 # ---------------------------------------------------------------------------
 class TestSweepClose:
+    def test_empty_response_closes_turn(self, monkeypatch):
+        _clear_otel_env(monkeypatch)
+        mod = _fresh_plugin()
+        tracer = _install_fake_tracer(mod)
+        mod.on_pre_api_request(task_id="t", session_id="s", api_call_count=1,
+                               request_messages=[{"role": "user", "content": "go"}])
+        root, llm = tracer.spans[0], tracer.spans[1]
+
+        class _Msg:
+            content = None
+            tool_calls = []
+
+        mod.on_post_api_request(task_id="t", session_id="s", api_call_count=1,
+                                assistant_message=_Msg(), assistant_content_chars=0,
+                                assistant_tool_call_count=0)
+        assert llm.ended
+        assert root.ended
+        assert mod._TRACE_STATE == {}
+
     def test_finalize_closes_open_spans(self, monkeypatch):
         _clear_otel_env(monkeypatch)
         mod = _fresh_plugin()
@@ -548,6 +655,26 @@ class TestSweepClose:
         mod.on_session_reset(session_id="")
         assert tracer.spans[0].ended
         assert mod._TRACE_STATE == {}
+
+    def test_stale_state_reaped_on_next_pre_request(self, monkeypatch):
+        _clear_otel_env(monkeypatch)
+        mod = _fresh_plugin()
+        tracer = _install_fake_tracer(mod)
+        mod.on_pre_api_request(task_id="old", session_id="s", api_call_count=1,
+                               request_messages=[{"role": "user", "content": "go"}])
+        old_root, old_llm = tracer.spans[0], tracer.spans[1]
+        mod._TRACE_STATE["old"].last_updated_at = (
+            time.time() - mod._STATE_MAX_AGE_SECONDS - 1
+        )
+        mod._LAST_REAP_AT = 0.0
+
+        mod.on_pre_api_request(task_id="new", session_id="s", api_call_count=1,
+                               request_messages=[{"role": "user", "content": "next"}])
+
+        assert old_root.ended
+        assert old_llm.ended
+        assert "old" not in mod._TRACE_STATE
+        assert "new" in mod._TRACE_STATE
 
 
 # ---------------------------------------------------------------------------
