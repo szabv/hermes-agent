@@ -58,6 +58,7 @@ The repo ships these bundled plugins under `plugins/`. All are opt-in — enable
 | `disk-cleanup` | hooks + slash command | Auto-track ephemeral files and clean them on session end |
 | `security-guidance` | hooks | Pattern-match dangerous code on `write_file`/`patch` and append a security warning (or block) — 25 rules (Apache-2.0 fork of Anthropic's `claude-plugins-official` patterns) |
 | `observability/langfuse` | hooks | Trace turns / LLM calls / tools to [Langfuse](https://langfuse.com) |
+| `observability/openinference` | hooks | Export OpenInference spans over OTLP to any OpenTelemetry-compatible backend |
 | `spotify` | backend (7 tools) | Native Spotify playback, queue, search, playlists, albums, library |
 | `google_meet` | standalone | Join Meet calls, live-caption transcription, optional realtime duplex audio |
 | `image_gen/openai` | image backend | OpenAI `gpt-image-2` image generation backend (alternative to FAL) |
@@ -66,7 +67,7 @@ The repo ships these bundled plugins under `plugins/`. All are opt-in — enable
 | `hermes-achievements` | dashboard tab | Steam-style collectible badges generated from your real Hermes session history |
 | `kanban/dashboard` | dashboard tab | Kanban board UI for the multi-agent dispatcher — tasks, comments, fan-out, board switching. See [Kanban Multi-Agent](./kanban.md). |
 
-Memory providers (`plugins/memory/*`) and context engines (`plugins/context_engine/*`) are listed separately on [Memory Providers](./memory-providers.md) — they're managed through `hermes memory` and `hermes plugins` respectively. The full per-plugin detail for the two long-running hooks-based plugins follows.
+Memory providers (`plugins/memory/*`) and context engines (`plugins/context_engine/*`) are listed separately on [Memory Providers](./memory-providers.md) — they're managed through `hermes memory` and `hermes plugins` respectively. The full per-plugin detail for the long-running hooks-based plugins follows.
 
 ### disk-cleanup
 
@@ -192,6 +193,58 @@ Hermes-prefixed and standard SDK env vars (`LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECR
 **Performance:** the Langfuse client is cached after the first hook call. If credentials or SDK are missing, that decision is also cached — subsequent hooks fast-return without re-checking env vars or reloading config.
 
 **Disabling:** `hermes plugins disable observability/langfuse`. The plugin module is still discovered, but no module code runs until you re-enable.
+
+### observability/openinference
+
+Exports Hermes turn, LLM, and tool spans using the OpenInference semantic conventions over standard OTLP. It is backend-agnostic: Phoenix, Arize, Langfuse, Jaeger/Tempo, Honeycomb, Grafana, Dash0, and any OpenTelemetry collector can receive the traces as long as you point the standard `OTEL_*` environment variables at it.
+
+The plugin is fail-open. If the OpenTelemetry SDK/exporter is missing, no OTLP endpoint is configured, or exporter setup fails, hooks become a silent no-op and the agent loop continues.
+
+**Setup:**
+
+```bash
+pip install opentelemetry-sdk opentelemetry-exporter-otlp-proto-http openinference-semantic-conventions
+hermes plugins enable observability/openinference
+```
+
+Then put your OTLP endpoint in `~/.hermes/.env` or your shell:
+
+```bash
+OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=https://your-collector.example/v1/traces
+OTEL_EXPORTER_OTLP_HEADERS="authorization=Bearer <token>"
+OTEL_RESOURCE_ATTRIBUTES=openinference.project.name=my-project
+```
+
+**How it works:**
+
+| Hook | Behaviour |
+|---|---|
+| `pre_api_request` / `pre_llm_call` | Open or reuse a per-turn `hermes.agent.turn` span and start `hermes.llm.call.N` with model/provider metadata plus capped recent input messages. |
+| `post_api_request` / `post_llm_call` | Attach finish reason, token counts, assistant output, and flattened tool calls; close the turn when there are no tool calls to wait for. |
+| `pre_tool_call` | Start a `hermes.tool.<name>` child span with tool parameters. |
+| `post_tool_call` | Close the tool span with output and duration. |
+| `on_session_finalize` / `on_session_reset` | Sweep-close any open spans and flush the private tracer provider. |
+
+**Privacy:** when active, the plugin exports prompt, response, tool arguments, and tool results to the configured OTLP backend. Content is truncated by `HERMES_OPENINFERENCE_MAX_ATTR_CHARS` but not redacted; disable the plugin if you do not want content exported.
+
+**Optional tuning** (in `.env`):
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `OTEL_EXPORTER_OTLP_PROTOCOL` | `http/protobuf` | Use `grpc` only when the gRPC exporter is installed. |
+| `OTEL_SERVICE_NAME` | `hermes-agent` | Service name attached to spans. |
+| `OTEL_TRACES_SAMPLER` / `OTEL_TRACES_SAMPLER_ARG` | SDK default | Sampling where supported by the exporter stack. |
+| `HERMES_OPENINFERENCE_MAX_ATTR_CHARS` | `12000` | Per-field truncation for captured strings. |
+| `HERMES_OPENINFERENCE_DEBUG` | `false` | Verbose plugin logging to `agent.log` without logging auth headers. |
+
+**Verify:**
+
+```bash
+hermes plugins list                 # observability/openinference should show "enabled"
+hermes chat -q "hello"              # check your backend for a hermes.agent.turn span
+```
+
+**Disabling:** `hermes plugins disable observability/openinference`. Unsetting the OTLP endpoint also makes the plugin inert.
 
 ### google_meet
 
