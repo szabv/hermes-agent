@@ -41,7 +41,7 @@ import os
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Protocol
 
 logger = logging.getLogger(__name__)
 
@@ -132,9 +132,11 @@ KIND_TOOL = "TOOL"
 
 DEFAULT_SERVICE_NAME = "hermes-agent"
 DEFAULT_MAX_ATTR_CHARS = 12000
+_MAX_CAPTURED_MESSAGES = 50
 # Reap TraceState entries idle longer than this so a Turn that never closes
 # cannot leak spans/memory in a long-running gateway.
 _STATE_MAX_AGE_SECONDS = 3600.0
+_STATE_REAP_INTERVAL_SECONDS = 60.0
 _STATE_MAX_ENTRIES = 4096
 
 
@@ -144,23 +146,28 @@ class TraceState:
     trace_key: str
     root_span: Any
     session_id: str = ""
-    llm_spans: Dict[str, Any] = field(default_factory=dict)
-    llm_retry_counts: Dict[str, int] = field(default_factory=dict)
-    tools: Dict[str, Any] = field(default_factory=dict)
-    pending_tools_by_name: Dict[str, List[Any]] = field(default_factory=dict)
-    has_tool_calls_this_turn: bool = False
+    llm_spans: dict[str, Any] = field(default_factory=dict)
+    llm_retry_counts: dict[str, int] = field(default_factory=dict)
+    tools: dict[str, Any] = field(default_factory=dict)
+    pending_tools_by_name: dict[str, list[Any]] = field(default_factory=dict)
     last_updated_at: float = field(default_factory=time.time)
 
 
 _STATE_LOCK = threading.Lock()
-_TRACE_STATE: Dict[str, TraceState] = {}
+_TRACE_STATE: dict[str, TraceState] = {}
+_LAST_REAP_AT = 0.0
 
 _TRACER = None
 _TRACER_PROVIDER = None
+_TRACER_LOCK = threading.Lock()
 # Sentinel: "_get_tracer() tried and failed". Lets every later hook fast-return
 # without re-checking env or re-attempting provider build (bundled-plugin precedent).
 _INIT_FAILED = object()
 _ATEXIT_REGISTERED = False
+
+
+class _PluginContext(Protocol):
+    def register_hook(self, name: str, callback: Any) -> None: ...
 
 
 # --- Small helpers ----------------------------------------------------------
@@ -196,7 +203,9 @@ def _max_attr_chars() -> int:
         return DEFAULT_MAX_ATTR_CHARS
 
 
-def _safe_attr(value: Any, *, max_chars: Optional[int] = None) -> str:
+def _safe_attr(
+    value: Any, *, max_chars: int | None = None
+) -> str | int | float | bool:
     """Stringify + truncate a value for use as a span attribute (no redaction)."""
     max_chars = max_chars if max_chars is not None else _max_attr_chars()
     if isinstance(value, str):
@@ -204,7 +213,7 @@ def _safe_attr(value: Any, *, max_chars: Optional[int] = None) -> str:
     elif value is None:
         text = ""
     elif isinstance(value, (int, float, bool)):
-        return value  # type: ignore[return-value]
+        return value
     else:
         try:
             text = json.dumps(value, ensure_ascii=False, default=str)
@@ -215,7 +224,7 @@ def _safe_attr(value: Any, *, max_chars: Optional[int] = None) -> str:
     return text
 
 
-def _set(span: Any, key: str, value: Any, *, max_chars: Optional[int] = None) -> None:
+def _set(span: Any, key: str, value: Any, *, max_chars: int | None = None) -> None:
     """Set a span attribute, skipping None/empty and truncating strings."""
     if span is None or value is None:
         return
@@ -242,7 +251,7 @@ def _endpoint_configured() -> bool:
     )
 
 
-def _build_exporter():
+def _build_exporter() -> Any | None:
     """Pick the OTLP exporter from OTEL_EXPORTER_OTLP_PROTOCOL.
 
     Defaults to http/protobuf. gRPC is used only when explicitly requested
@@ -262,7 +271,7 @@ def _build_exporter():
     return _OTLPHTTPSpanExporter()
 
 
-def _build_resource():
+def _build_resource() -> Any:
     service_name = _env("OTEL_SERVICE_NAME") or DEFAULT_SERVICE_NAME
     # Resource.create() merges OTEL_RESOURCE_ATTRIBUTES + OTEL_SERVICE_NAME from
     # the environment; the explicit service.name preserves our default when the
@@ -270,7 +279,7 @@ def _build_resource():
     return Resource.create({"service.name": service_name})
 
 
-def _get_tracer():
+def _get_tracer() -> Any | None:
     """Return a cached private tracer, or None when tracing is unavailable.
 
     Cached: first call builds a plugin-private TracerProvider + bounded
@@ -278,45 +287,52 @@ def _get_tracer():
     None via _INIT_FAILED). Never hijacks the global OTel provider.
     """
     global _TRACER, _TRACER_PROVIDER, _ATEXIT_REGISTERED
-    if _TRACER is _INIT_FAILED:
+    cached = _TRACER
+    if cached is _INIT_FAILED:
         return None
-    if _TRACER is not None:
-        return _TRACER
+    if cached is not None:
+        return cached
 
-    if _otel_trace is None or TracerProvider is None or Resource is None:
-        _TRACER = _INIT_FAILED
-        return None
+    with _TRACER_LOCK:
+        if _TRACER is _INIT_FAILED:
+            return None
+        if _TRACER is not None:
+            return _TRACER
 
-    if not _endpoint_configured():
-        # No surprise traffic to a phantom local collector — stay inert.
-        _TRACER = _INIT_FAILED
-        return None
-
-    try:
-        exporter = _build_exporter()
-        if exporter is None:
-            logger.warning(
-                "OpenInference plugin: no OTLP span exporter available. Install "
-                "opentelemetry-exporter-otlp-proto-http (and the SDK)."
-            )
+        if _otel_trace is None or TracerProvider is None or Resource is None:
             _TRACER = _INIT_FAILED
             return None
-        provider = TracerProvider(resource=_build_resource())
-        provider.add_span_processor(BatchSpanProcessor(exporter))
-        _TRACER_PROVIDER = provider
-        _TRACER = provider.get_tracer("hermes.openinference", "1.0.0")
-    except Exception as exc:  # pragma: no cover - fail-open
-        logger.warning("OpenInference plugin: could not initialize tracer: %s", exc)
-        _TRACER = _INIT_FAILED
-        _TRACER_PROVIDER = None
-        return None
 
-    if not _ATEXIT_REGISTERED:
-        atexit.register(_shutdown)
-        _ATEXIT_REGISTERED = True
+        if not _endpoint_configured():
+            # No surprise traffic to a phantom local collector — stay inert.
+            _TRACER = _INIT_FAILED
+            return None
 
-    _debug("tracer initialized")
-    return _TRACER
+        try:
+            exporter = _build_exporter()
+            if exporter is None:
+                logger.warning(
+                    "OpenInference plugin: no OTLP span exporter available. Install "
+                    "opentelemetry-exporter-otlp-proto-http (and the SDK)."
+                )
+                _TRACER = _INIT_FAILED
+                return None
+            provider = TracerProvider(resource=_build_resource())
+            provider.add_span_processor(BatchSpanProcessor(exporter))
+            _TRACER_PROVIDER = provider
+            _TRACER = provider.get_tracer("hermes.openinference", "1.0.0")
+        except Exception as exc:  # pragma: no cover - fail-open
+            logger.warning("OpenInference plugin: could not initialize tracer: %s", exc)
+            _TRACER = _INIT_FAILED
+            _TRACER_PROVIDER = None
+            return None
+
+        if not _ATEXIT_REGISTERED:
+            atexit.register(_shutdown)
+            _ATEXIT_REGISTERED = True
+
+        _debug("tracer initialized")
+        return _TRACER
 
 
 def _shutdown() -> None:
@@ -354,7 +370,9 @@ def _request_key(api_call_count: Any) -> str:
     return str(api_call_count or 0)
 
 
-def _start_span(name: str, *, parent: Any, kind: str, attributes: Optional[dict] = None):
+def _start_span(
+    name: str, *, parent: Any, kind: str, attributes: dict[str, Any] | None = None
+) -> Any | None:
     tracer = _get_tracer()
     if tracer is None:
         return None
@@ -368,7 +386,7 @@ def _start_span(name: str, *, parent: Any, kind: str, attributes: Optional[dict]
         return None
 
 
-def _end_span(span: Any, *, error: Optional[str] = None) -> None:
+def _end_span(span: Any, *, error: str | None = None) -> None:
     if span is None:
         return
     try:
@@ -392,6 +410,18 @@ def _stringify_content(content: Any) -> str:
         return str(content)
 
 
+def _captured_messages(messages: Any) -> list[Any]:
+    if not isinstance(messages, list):
+        return []
+    return messages[-_MAX_CAPTURED_MESSAGES:]
+
+
+def _safe_tool_calls(tool_calls: Any) -> list[Any] | tuple[Any, ...]:
+    if isinstance(tool_calls, (list, tuple)):
+        return tool_calls
+    return []
+
+
 def _set_message_attrs(span: Any, prefix: str, messages: Any) -> None:
     """Flatten a list of chat messages into indexed OI message attributes.
 
@@ -407,7 +437,7 @@ def _set_message_attrs(span: Any, prefix: str, messages: Any) -> None:
         content = message.get("content")
         if content is not None:
             _set(span, f"{prefix}.{i}.{MESSAGE_CONTENT}", _stringify_content(content))
-        tool_calls = message.get("tool_calls") or []
+        tool_calls = _safe_tool_calls(message.get("tool_calls"))
         for j, tc in enumerate(tool_calls):
             fn = tc.get("function") if isinstance(tc, dict) else None
             name = fn.get("name") if isinstance(fn, dict) else None
@@ -426,7 +456,7 @@ def _set_output_message_attrs(span: Any, prefix: str, assistant_message: Any) ->
     content = getattr(assistant_message, "content", None)
     if content is not None:
         _set(span, f"{prefix}.0.{MESSAGE_CONTENT}", _stringify_content(content))
-    tool_calls = getattr(assistant_message, "tool_calls", None) or []
+    tool_calls = _safe_tool_calls(getattr(assistant_message, "tool_calls", None))
     for j, tc in enumerate(tool_calls):
         fn = getattr(tc, "function", None)
         name = getattr(fn, "name", None) if fn is not None else None
@@ -458,24 +488,39 @@ def _set_usage_attrs(span: Any, usage: Any) -> None:
         _set(span, TOKEN_REASONING, usage.get("reasoning_tokens"))
 
 
-def _reap_stale_locked(now: float) -> None:
-    """Drop idle/over-capacity TraceState entries (caller holds _STATE_LOCK)."""
-    stale = [k for k, s in _TRACE_STATE.items() if now - s.last_updated_at > _STATE_MAX_AGE_SECONDS]
-    for key in stale:
-        state = _TRACE_STATE.pop(key, None)
-        if state is not None:
-            _sweep_close_state(state)
-    if len(_TRACE_STATE) > _STATE_MAX_ENTRIES:
-        # Evict oldest first.
+def _reap_stale_locked(now: float) -> list[TraceState]:
+    """Remove idle/over-capacity TraceState entries (caller holds _STATE_LOCK)."""
+    global _LAST_REAP_AT
+    removed: list[TraceState] = []
+    should_scan_age = (
+        now < _LAST_REAP_AT
+        or now - _LAST_REAP_AT >= _STATE_REAP_INTERVAL_SECONDS
+    )
+    if should_scan_age:
+        _LAST_REAP_AT = now
+        stale = [
+            k
+            for k, s in _TRACE_STATE.items()
+            if now - s.last_updated_at > _STATE_MAX_AGE_SECONDS
+        ]
+        for key in stale:
+            state = _TRACE_STATE.pop(key, None)
+            if state is not None:
+                removed.append(state)
+
+    overflow = len(_TRACE_STATE) - _STATE_MAX_ENTRIES
+    if overflow > 0:
+        # Evict oldest first. This path is only hot when the global cap is hit.
         for key, _ in sorted(_TRACE_STATE.items(), key=lambda kv: kv[1].last_updated_at)[
-            : len(_TRACE_STATE) - _STATE_MAX_ENTRIES
+            :overflow
         ]:
             state = _TRACE_STATE.pop(key, None)
             if state is not None:
-                _sweep_close_state(state)
+                removed.append(state)
+    return removed
 
 
-def _sweep_close_state(state: TraceState, *, error: Optional[str] = None) -> None:
+def _sweep_close_state(state: TraceState, *, error: str | None = None) -> None:
     """Force-close all open spans for a TraceState (sweep-close backbone)."""
     for span in list(state.llm_spans.values()):
         _end_span(span, error=error or "span closed by sweep")
@@ -492,7 +537,7 @@ def _sweep_close_state(state: TraceState, *, error: Optional[str] = None) -> Non
 
 
 def _start_root(task_key: str, *, task_id: str, session_id: str, platform: str) -> TraceState:
-    attrs: Dict[str, Any] = {}
+    attrs: dict[str, Any] = {}
     if session_id:
         attrs["session.id"] = session_id
     if platform:
@@ -536,9 +581,13 @@ def on_pre_api_request(*, task_id: str = "", session_id: str = "", platform: str
     task_key = _trace_key(task_id, session_id)
     req_key = _request_key(api_call_count)
 
+    span = None
+    retry_span = None
+    retry_count = 0
+    stale_states: list[TraceState] = []
     with _STATE_LOCK:
         now = time.time()
-        _reap_stale_locked(now)
+        stale_states = _reap_stale_locked(now)
         state = _TRACE_STATE.get(task_key)
         if state is None:
             state = _start_root(task_key, task_id=task_id, session_id=session_id, platform=platform)
@@ -548,32 +597,40 @@ def on_pre_api_request(*, task_id: str = "", session_id: str = "", platform: str
         existing = state.llm_spans.get(req_key)
         if existing is not None:
             # Retry of the same logical call: keep the span, bump retry_count.
-            count = state.llm_retry_counts.get(req_key, 0) + 1
-            state.llm_retry_counts[req_key] = count
-            _set(existing, LLM_RETRY_COUNT, count)
-            return
+            retry_count = state.llm_retry_counts.get(req_key, 0) + 1
+            state.llm_retry_counts[req_key] = retry_count
+            retry_span = existing
+        else:
+            span = _start_span(
+                f"hermes.llm.call.{api_call_count}",
+                parent=state.root_span,
+                kind=KIND_LLM,
+            )
+            state.llm_spans[req_key] = span
+            state.llm_retry_counts[req_key] = 0
 
-        attrs: Dict[str, Any] = {}
-        span = _start_span(
-            f"hermes.llm.call.{api_call_count}",
-            parent=state.root_span,
-            kind=KIND_LLM,
-            attributes=attrs,
-        )
-        if span is not None:
-            _set(span, LLM_MODEL_NAME, model)
-            _set(span, LLM_PROVIDER, provider)
-            _set(span, LLM_SYSTEM, provider)
-            invocation: Dict[str, Any] = {"api_mode": api_mode}
-            if max_tokens is not None:
-                invocation["max_tokens"] = max_tokens
-            _set(span, LLM_INVOCATION_PARAMETERS, json.dumps(invocation, default=str))
-            if isinstance(request_messages, list):
-                _set(span, INPUT_VALUE, _stringify_content(request_messages))
-                _set(span, INPUT_MIME_TYPE, MIME_TYPE_JSON)
-                _set_message_attrs(span, LLM_INPUT_MESSAGES, request_messages)
-        state.llm_spans[req_key] = span
-        state.llm_retry_counts[req_key] = 0
+    for stale_state in stale_states:
+        _sweep_close_state(stale_state)
+
+    if retry_span is not None:
+        _set(retry_span, LLM_RETRY_COUNT, retry_count)
+        return
+
+    if span is None:
+        return
+
+    _set(span, LLM_MODEL_NAME, model)
+    _set(span, LLM_PROVIDER, provider)
+    _set(span, LLM_SYSTEM, provider)
+    invocation: dict[str, Any] = {"api_mode": api_mode}
+    if max_tokens is not None:
+        invocation["max_tokens"] = max_tokens
+    _set(span, LLM_INVOCATION_PARAMETERS, json.dumps(invocation, default=str))
+    if isinstance(request_messages, list):
+        messages = _captured_messages(request_messages)
+        _set(span, INPUT_VALUE, _stringify_content(messages))
+        _set(span, INPUT_MIME_TYPE, MIME_TYPE_JSON)
+        _set_message_attrs(span, LLM_INPUT_MESSAGES, messages)
 
 
 def on_post_api_request(*, task_id: str = "", session_id: str = "", model: str = "",
@@ -604,18 +661,14 @@ def on_post_api_request(*, task_id: str = "", session_id: str = "", model: str =
         _set_output_message_attrs(span, LLM_OUTPUT_MESSAGES, assistant_message)
     _end_span(span)
 
-    has_tools = bool(assistant_tool_call_count) or bool(
-        getattr(assistant_message, "tool_calls", None)
+    message_tool_calls = (
+        _safe_tool_calls(getattr(assistant_message, "tool_calls", None))
+        if assistant_message is not None
+        else []
     )
-    has_content = bool(assistant_content_chars) or bool(
-        getattr(assistant_message, "content", None)
-    )
-    if has_tools:
-        with _STATE_LOCK:
-            if state.trace_key in _TRACE_STATE:
-                state.has_tool_calls_this_turn = True
-    elif has_content:
-        # Turn complete (assistant content, no tool calls) — close the root.
+    has_tools = bool(assistant_tool_call_count) or bool(message_tool_calls)
+    if not has_tools:
+        # Turn complete (no tool calls to wait for) — close the root.
         with _STATE_LOCK:
             popped = _TRACE_STATE.pop(task_key, None)
         if popped is not None:
@@ -633,7 +686,7 @@ def on_pre_tool_call(*, tool_name: str = "", args: Any = None, task_id: str = ""
         if state is None:
             return
         state.last_updated_at = time.time()
-        attrs: Dict[str, Any] = {TOOL_NAME: tool_name}
+        attrs: dict[str, Any] = {TOOL_NAME: tool_name}
         span = _start_span(
             f"hermes.tool.{tool_name}",
             parent=state.root_span,
@@ -716,7 +769,7 @@ on_session_reset = _on_session_boundary
 on_post_llm_call = on_post_api_request
 
 
-def register(ctx) -> None:
+def register(ctx: _PluginContext) -> None:
     # Prefer pre_api_request/post_api_request (the real per-API-call seam).
     ctx.register_hook("pre_api_request", on_pre_api_request)
     ctx.register_hook("post_api_request", on_post_api_request)
