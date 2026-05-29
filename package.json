@@ -16,7 +16,9 @@
   },
   "homepage": "https://github.com/NousResearch/Hermes-Agent#readme",
   "dependencies": {
-    "agent-browser": "^0.26.0"
+    "agent-browser": "^0.26.0",
+    "mathjax-full": "^3.2.1",
+    "sharp": "^0.34.5"
   },
   "overrides": {
     "lodash": "4.18.1"
