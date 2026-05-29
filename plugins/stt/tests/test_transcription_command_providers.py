@@ -67,7 +67,7 @@ def _python_emit_command(transcript_text: str, output_placeholder: str = "{outpu
     # avoid shell expansion of $ / ` / etc.
     payload = (
         "import sys; "
-        f"open(sys.argv[1], 'w').write({transcript_text!r})"
+        f"open(sys.argv[1], 'w', encoding='utf-8').write({transcript_text!r})"
     )
     return f'"{interpreter}" -c "{payload}" {output_placeholder}'
 
@@ -396,7 +396,7 @@ class TestTranscribeCommandSTT:
         audio = _make_silent_wav(tmp_path / "input.wav")
         # Write the model into the transcript so we can assert it propagated.
         interpreter = sys.executable
-        payload = "import sys; open(sys.argv[2], 'w').write(sys.argv[1])"
+        payload = "import sys; open(sys.argv[2], 'w', encoding='utf-8').write(sys.argv[1])"
         cfg = {
             "command": f'"{interpreter}" -c "{payload}" {{model}} {{output_path}}',
             "model": "config-model",
@@ -410,7 +410,7 @@ class TestTranscribeCommandSTT:
     def test_config_model_used_when_no_override(self, tmp_path):
         audio = _make_silent_wav(tmp_path / "input.wav")
         interpreter = sys.executable
-        payload = "import sys; open(sys.argv[2], 'w').write(sys.argv[1])"
+        payload = "import sys; open(sys.argv[2], 'w', encoding='utf-8').write(sys.argv[1])"
         cfg = {
             "command": f'"{interpreter}" -c "{payload}" {{model}} {{output_path}}',
             "model": "config-model",
@@ -421,7 +421,7 @@ class TestTranscribeCommandSTT:
     def test_language_from_provider_config_wins(self, tmp_path):
         audio = _make_silent_wav(tmp_path / "input.wav")
         interpreter = sys.executable
-        payload = "import sys; open(sys.argv[2], 'w').write(sys.argv[1])"
+        payload = "import sys; open(sys.argv[2], 'w', encoding='utf-8').write(sys.argv[1])"
         cfg = {
             "command": f'"{interpreter}" -c "{payload}" {{language}} {{output_path}}',
             "language": "fr",
@@ -435,7 +435,7 @@ class TestTranscribeCommandSTT:
     def test_language_falls_back_to_stt_section(self, tmp_path):
         audio = _make_silent_wav(tmp_path / "input.wav")
         interpreter = sys.executable
-        payload = "import sys; open(sys.argv[2], 'w').write(sys.argv[1])"
+        payload = "import sys; open(sys.argv[2], 'w', encoding='utf-8').write(sys.argv[1])"
         cfg = {
             "command": f'"{interpreter}" -c "{payload}" {{language}} {{output_path}}',
         }
@@ -447,7 +447,7 @@ class TestTranscribeCommandSTT:
     def test_language_defaults_to_en(self, tmp_path):
         audio = _make_silent_wav(tmp_path / "input.wav")
         interpreter = sys.executable
-        payload = "import sys; open(sys.argv[2], 'w').write(sys.argv[1])"
+        payload = "import sys; open(sys.argv[2], 'w', encoding='utf-8').write(sys.argv[1])"
         cfg = {
             "command": f'"{interpreter}" -c "{payload}" {{language}} {{output_path}}',
         }

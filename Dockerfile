@@ -136,13 +136,15 @@ RUN npm install --prefer-offline --no-audit && \
 # frontend stats the readme path during dep resolution, so we `touch` an
 # empty placeholder — the real README is restored by `COPY . .` below.
 #
-# `uv sync --frozen --no-install-project --extra all --extra messaging`
+# `uv sync --frozen --no-install-project --extra all --extra telegram
+# --extra slack --extra discord --extra feishu --extra dingtalk`
 # installs the deps reachable through the composite `[all]` extra
 # (handpicked set intended for the production image), plus gateway
 # messaging adapters that should work in the published image without a
 # first-boot lazy install.  We do NOT use `--all-extras`:
 # that would pull in `[rl]` (atroposlib + tinker + torch + wandb from
-# git), `[yc-bench]` (another git dep), and `[termux-all]` (Android
+# git), `[yc-bench]` (another git dep), `[matrix]` (python-olm, no
+# wheel on all platforms), and `[termux-all]` (Android
 # redundancy), none of which belong in the published container.
 #
 # Provider packages (anthropic, bedrock, azure-identity) are included

@@ -58,6 +58,10 @@ ALLOWED_DIRS: list[Path] = [
 ALLOWED_FILES: set[str] = {
     # The plugin loader itself must import plugin packages.
     "hermes_cli/plugins.py",
+    # Tests that register real plugin hooks via the registry (correct pattern —
+    # they import the function solely to inject it into the registry, not to
+    # call it directly).
+    "tests/agent/test_credential_pool.py",
 }
 
 # Regex matching a plugin import line.
