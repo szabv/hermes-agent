@@ -93,6 +93,8 @@ plugin inert.)
   bump `llm.retry_count`, not new spans), with `llm.model_name`, `llm.provider`,
   `llm.invocation_parameters`, `llm.finish_reason`, token counts
   (`llm.token_count.*`), and flattened `llm.input_messages.*` / `llm.output_messages.*`.
+  Input capture is capped to the most recent 50 messages so long sessions do not
+  repeatedly export the entire conversation history.
 - **TOOL** `hermes.tool.<name>` — `kind=TOOL`, with `tool.name`, `tool.id`,
   `tool.parameters`, `input.value`/`output.value`, and `duration_ms`.
 
@@ -104,8 +106,9 @@ plugin inert.)
   finalize/reset (and at process exit), so they appear with a best-effort status.
 - **Tool pairing is FIFO-by-name.** `pre_tool_call` carries no `tool_call_id`, so
   spans are paired by tool name in FIFO order. Two concurrent same-name tools may
-  finish out of order, swapping duration/status/result between their two spans —
-  span count, names, and parenting stay correct.
+  finish out of order, or an earlier blocked same-name tool may never emit `post`,
+  swapping duration/status/result between spans — span count, names, and parenting
+  stay correct.
 - **One LLM span per logical call.** Provider/SDK retries of the same call keep a
   single span and increment `llm.retry_count` (total wall-time, honest retry count).
 - The plugin uses a **private** `TracerProvider`; it never touches the global OTel
