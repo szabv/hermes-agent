@@ -1,0 +1,60 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+
+language: "en-US"
+early_access: false
+
+reviews:
+  profile: "assertive"
+  request_changes_workflow: false
+  high_level_summary: true
+  review_status: true
+  review_details: true
+
+  auto_review:
+    enabled: true
+    drafts: false
+    base_branches:
+      - "live"
+    auto_incremental_review: true
+    auto_pause_after_reviewed_commits: 5
+    ignore_title_keywords:
+      - "WIP"
+      - "DO NOT MERGE"
+      - "[skip review]"
+    ignore_usernames:
+      - "dependabot[bot]"
+      - "renovate[bot]"
+      - "github-actions[bot]"
+
+  path_filters:
+    - "!node_modules/**"
+    - "!dist/**"
+    - "!build/**"
+    - "!coverage/**"
+    - "!**/*.lock"
+    - "!package-lock.json"
+
+  path_instructions:
+    - path: "plugins/**"
+      instructions: |
+        Review plugin lifecycle, configuration handling, profile safety, logging, and failure isolation.
+        Flag changes that can break gateway startup, plugin discovery, or optional dependency behavior.
+
+    - path: "gateway/**"
+      instructions: |
+        Pay close attention to async behavior, message handling, platform-specific regressions, and secret/config handling.
+
+    - path: "agent/**"
+      instructions: |
+        Review carefully for prompt-cache safety, role alternation, memory behavior, model routing, and tool-call loop regressions.
+
+    - path: "tools/**"
+      instructions: |
+        Check tool schemas, JSON return shape, timeout handling, filesystem safety, and cleanup of temporary files.
+
+    - path: "tests/**"
+      instructions: |
+        Check that tests cover public behavior and regression cases, not only implementation details.
+
+chat:
+  auto_reply: true
