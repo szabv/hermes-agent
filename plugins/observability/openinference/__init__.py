@@ -342,9 +342,10 @@ def _shutdown() -> None:
     tool spans must be sweep-closed *before* ``provider.shutdown()`` performs its
     final flush — otherwise they are dropped on hard exit. State is removed
     atomically under ``_STATE_LOCK``, but spans are ended outside the lock so we
-    never hold it across an export. Safe to call repeatedly: a second call finds
-    no state and a provider whose ``shutdown()`` is itself idempotent.
+    never hold it across an export. Idempotent: the provider reference is dropped
+    before shutdown, so a second call finds no state and no provider to re-shut.
     """
+    global _TRACER_PROVIDER
     with _STATE_LOCK:
         states = list(_TRACE_STATE.values())
         _TRACE_STATE.clear()
@@ -356,6 +357,9 @@ def _shutdown() -> None:
     provider = _TRACER_PROVIDER
     if provider is None:
         return
+    # Drop the reference first so a repeat call (or a post-shutdown _flush) is a
+    # no-op rather than re-invoking provider.shutdown().
+    _TRACER_PROVIDER = None
     try:
         provider.shutdown()
     except Exception:  # pragma: no cover - fail-open
