@@ -336,7 +336,23 @@ def _get_tracer() -> Any | None:
 
 
 def _shutdown() -> None:
-    """Idempotent hard-exit backstop: flush + shut down the private provider."""
+    """Idempotent hard-exit backstop: sweep-close open traces, then shut down.
+
+    Spans are only queued for export on ``.end()``, so any in-flight root/LLM/
+    tool spans must be sweep-closed *before* ``provider.shutdown()`` performs its
+    final flush — otherwise they are dropped on hard exit. State is removed
+    atomically under ``_STATE_LOCK``, but spans are ended outside the lock so we
+    never hold it across an export. Safe to call repeatedly: a second call finds
+    no state and a provider whose ``shutdown()`` is itself idempotent.
+    """
+    with _STATE_LOCK:
+        states = list(_TRACE_STATE.values())
+        _TRACE_STATE.clear()
+    for state in states:
+        try:
+            _sweep_close_state(state, error="span closed at process exit")
+        except Exception:  # pragma: no cover - fail-open
+            pass
     provider = _TRACER_PROVIDER
     if provider is None:
         return
