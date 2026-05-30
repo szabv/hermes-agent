@@ -651,6 +651,13 @@ def on_pre_api_request(*, task_id: str = "", session_id: str = "", platform: str
         _set(span, INPUT_VALUE, _stringify_content(messages))
         _set(span, INPUT_MIME_TYPE, MIME_TYPE_JSON)
         _set_message_attrs(span, LLM_INPUT_MESSAGES, messages)
+        # Capture the user's prompt on the root AGENT span (first LLM call only).
+        if state.root_span is not None and api_call_count == 0:
+            for msg in reversed(request_messages):
+                if isinstance(msg, dict) and msg.get("role") == "user":
+                    _set(state.root_span, INPUT_VALUE, _stringify_content(msg.get("content", "")))
+                    _set(state.root_span, INPUT_MIME_TYPE, MIME_TYPE_TEXT)
+                    break
 
 
 def on_post_api_request(*, task_id: str = "", session_id: str = "", model: str = "",
@@ -680,6 +687,15 @@ def on_post_api_request(*, task_id: str = "", session_id: str = "", model: str =
         _set(span, OUTPUT_MIME_TYPE, MIME_TYPE_TEXT)
         _set_output_message_attrs(span, LLM_OUTPUT_MESSAGES, assistant_message)
     _end_span(span)
+
+    # Propagate the assistant's text output to the root AGENT span.
+    # On multi-call turns (tool-use loops) this overwrites each call; the
+    # final text response (the one that closes the root) is what persists.
+    if state.root_span is not None and assistant_message is not None:
+        content = getattr(assistant_message, "content", None)
+        if content:
+            _set(state.root_span, OUTPUT_VALUE, _stringify_content(content))
+            _set(state.root_span, OUTPUT_MIME_TYPE, MIME_TYPE_TEXT)
 
     message_tool_calls = (
         _safe_tool_calls(getattr(assistant_message, "tool_calls", None))
