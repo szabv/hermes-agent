@@ -685,11 +685,14 @@ class TestSweepClose:
         mod = _fresh_plugin()
         tracer = _install_fake_tracer(mod)
 
-        events = []
+        observed = {"calls": 0, "all_ended_at_shutdown": None}
 
         class FakeProvider:
             def shutdown(self):
-                events.append("shutdown")
+                # Capture ordering at the moment of the final flush: every span
+                # must already be ended here, else it would be dropped on exit.
+                observed["all_ended_at_shutdown"] = all(s.ended for s in tracer.spans)
+                observed["calls"] += 1
 
         mod._TRACER_PROVIDER = FakeProvider()
 
@@ -706,10 +709,10 @@ class TestSweepClose:
         # All open spans ended, state drained, provider shut down once.
         assert root.ended and llm.ended and tool.ended
         assert mod._TRACE_STATE == {}
-        assert events == ["shutdown"]
-        # Ordering: spans must end before the provider's final flush, else they
-        # are dropped. FakeProvider only records its own shutdown, so we verify
-        # ordering via the spans being ended by the time shutdown ran (above).
+        assert observed["calls"] == 1
+        # Ordering guard: spans were already ended *when* provider.shutdown() ran,
+        # so the final flush exports them instead of dropping them.
+        assert observed["all_ended_at_shutdown"] is True
 
     def test_repeated_shutdown_is_safe(self, monkeypatch):
         _clear_otel_env(monkeypatch)
@@ -733,7 +736,8 @@ class TestSweepClose:
 
         assert root.ended
         assert mod._TRACE_STATE == {}
-        assert shutdowns["count"] >= 1
+        # Idempotent: the provider is shut down exactly once across both calls.
+        assert shutdowns["count"] == 1
 
 
 # ---------------------------------------------------------------------------
