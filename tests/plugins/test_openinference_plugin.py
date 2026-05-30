@@ -155,10 +155,11 @@ class TestDiscovery:
         manager = plugins_mod.PluginManager()
         manager.discover_and_load()
 
-        loaded = manager._plugins.get("observability/openinference")
+        plugins = {plugin["key"]: plugin for plugin in manager.list_plugins()}
+        loaded = plugins.get("observability/openinference")
         assert loaded is not None, "plugin not discovered"
-        assert loaded.enabled is False
-        assert "not enabled" in (loaded.error or "").lower()
+        assert loaded["enabled"] is False
+        assert "not enabled" in (loaded["error"] or "").lower()
 
 
 # ---------------------------------------------------------------------------
@@ -678,14 +679,74 @@ class TestSweepClose:
 
 
 # ---------------------------------------------------------------------------
-# 12. Backend-agnostic guard: no hardcoded vendor name or endpoint in source.
+# 12. Backend-agnostic guard: telemetry shape stays vendor-neutral at runtime.
 # ---------------------------------------------------------------------------
 class TestBackendAgnostic:
-    def test_no_vendor_or_endpoint_strings(self):
-        src = (PLUGIN_DIR / "__init__.py").read_text().lower()
-        for needle in ("phoenix", "arize", "langfuse", ":6006", "4317", "4318",
-                       "localhost", "127.0.0.1"):
-            assert needle not in src, f"vendor/endpoint string leaked into source: {needle!r}"
+    BACKEND_NEEDLES = (
+        "phoenix", "arize", "langfuse", ":6006", "4317", "4318",
+        "localhost", "127.0.0.1",
+    )
+
+    @pytest.mark.parametrize(
+        "env",
+        [
+            {},
+            {
+                "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": (
+                    "http://phoenix.localhost:6006/v1/traces"
+                ),
+                "OTEL_EXPORTER_OTLP_ENDPOINT": "http://127.0.0.1:4317",
+                "OTEL_EXPORTER_OTLP_PROTOCOL": "grpc",
+                "OTEL_RESOURCE_ATTRIBUTES": "openinference.project.name=langfuse",
+            },
+        ],
+    )
+    def test_runtime_outputs_are_vendor_neutral(self, monkeypatch, env):
+        _clear_otel_env(monkeypatch)
+        monkeypatch.delenv("OTEL_RESOURCE_ATTRIBUTES", raising=False)
+        for key, value in env.items():
+            monkeypatch.setenv(key, value)
+        mod = _fresh_plugin()
+        tracer = _install_fake_tracer(mod)
+
+        class _Ctx:
+            def __init__(self):
+                self.hooks = []
+
+            def register_hook(self, name, callback):
+                self.hooks.append((name, callback.__name__))
+
+        ctx = _Ctx()
+        mod.register(ctx)
+
+        mod.on_pre_api_request(
+            task_id="t", session_id="s", platform="cli",
+            model="model", provider="provider", api_mode="chat_completions",
+            api_call_count=1,
+            request_messages=[{"role": "user", "content": "hello"}],
+        )
+
+        class _Msg:
+            content = "done"
+            tool_calls = []
+
+        mod.on_post_api_request(
+            task_id="t", session_id="s", api_call_count=1,
+            finish_reason="stop", assistant_message=_Msg(),
+        )
+
+        payload = {
+            "hooks": [name for name, _ in ctx.hooks],
+            "spans": [
+                {"name": span.name, "attributes": span.attributes}
+                for span in tracer.spans
+            ],
+        }
+        text = json.dumps(payload, sort_keys=True, default=str).lower()
+        for needle in self.BACKEND_NEEDLES:
+            assert needle not in text, (
+                f"backend-specific value leaked into telemetry: {needle!r}"
+            )
 
 
 # ---------------------------------------------------------------------------
