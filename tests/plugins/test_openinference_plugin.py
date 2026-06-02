@@ -421,6 +421,7 @@ class TestSpanShaping:
         tool = tracer.spans[-1]
         assert tool.attributes["openinference.span.kind"] == "TOOL"
         assert tool.attributes["tool.name"] == "read_file"
+        assert tool.attributes["session.id"] == "s"
         assert tool.name == "hermes.tool.read_file"
         mod.on_post_tool_call(tool_name="read_file", args={"path": "x.py"}, result={"content": "ok"},
                               task_id="t", session_id="s", tool_call_id="call-9", duration_ms=42)
@@ -428,6 +429,29 @@ class TestSpanShaping:
         assert tool.attributes["output.value"] == '{"content": "ok"}'
         assert tool.attributes["duration_ms"] == 42
         assert tool.ended is True
+
+    def test_tool_span_session_id_falls_back_to_trace_state(self, monkeypatch):
+        _clear_otel_env(monkeypatch)
+        mod = _fresh_plugin()
+        tracer = _install_fake_tracer(mod)
+        mod.on_pre_api_request(
+            task_id="t",
+            session_id="s",
+            api_call_count=1,
+            request_messages=[{"role": "user", "content": "go"}],
+        )
+
+        mod.on_pre_tool_call(
+            tool_name="read_file",
+            args={"path": "x.py"},
+            task_id="t",
+            session_id="",
+        )
+
+        root = tracer.spans[0]
+        tool = tracer.spans[-1]
+        assert tool.attributes["session.id"] == "s"
+        assert _parent_of(tool) is root
 
     def test_output_message_tool_calls_flattened(self, monkeypatch):
         _clear_otel_env(monkeypatch)

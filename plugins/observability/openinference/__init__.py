@@ -738,7 +738,10 @@ def on_pre_tool_call(*, tool_name: str = "", args: Any = None, task_id: str = ""
         if state is None:
             return
         state.last_updated_at = time.time()
+        effective_session_id = session_id or state.session_id
         attrs: dict[str, Any] = {TOOL_NAME: tool_name}
+        if effective_session_id:
+            attrs[SESSION_ID] = effective_session_id
         span = _start_span(
             f"hermes.tool.{tool_name}",
             parent=state.root_span,
