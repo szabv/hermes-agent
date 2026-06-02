@@ -67,7 +67,7 @@ The repo ships these bundled plugins under `plugins/`. All are opt-in — enable
 | `hermes-achievements` | dashboard tab | Steam-style collectible badges generated from your real Hermes session history |
 | `kanban/dashboard` | dashboard tab | Kanban board UI for the multi-agent dispatcher — tasks, comments, fan-out, board switching. See [Kanban Multi-Agent](./kanban.md). |
 
-Memory providers (`plugins/memory/*`) and context engines (`plugins/context_engine/*`) are listed separately on [Memory Providers](./memory-providers.md) — they're managed through `hermes memory` and `hermes plugins` respectively. The full per-plugin detail for the long-running hooks-based plugins follows.
+Memory providers (`plugins/memory/*`) and context engines (`plugins/context_engine/*`) are listed separately on [Memory Providers](./memory-providers.md). Memory providers are managed through `hermes memory`; context engines are primarily selected with the `context.engine` config setting, and packaged context-engine plugins can also be installed or removed with `hermes plugins`. The full per-plugin detail for the long-running hooks-based plugins follows.
 
 ### disk-cleanup
 
@@ -207,7 +207,7 @@ pip install opentelemetry-sdk opentelemetry-exporter-otlp-proto-http openinferen
 hermes plugins enable observability/openinference
 ```
 
-Then put your OTLP endpoint in `~/.hermes/.env` or your shell:
+Then put your OTLP endpoint in `$HERMES_HOME/.env` or your shell:
 
 ```bash
 OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=https://your-collector.example/v1/traces

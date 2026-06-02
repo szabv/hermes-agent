@@ -262,18 +262,22 @@ def _endpoint_configured() -> bool:
 
 
 def _build_exporter() -> Any | None:
-    """Pick the OTLP exporter from OTEL_EXPORTER_OTLP_PROTOCOL.
+    """Pick the OTLP exporter from trace-specific, then generic OTEL protocol.
 
     Defaults to http/protobuf. gRPC is used only when explicitly requested
     *and* the gRPC exporter is installed; otherwise we fall back to HTTP.
     """
-    protocol = _env("OTEL_EXPORTER_OTLP_PROTOCOL").lower()
+    protocol = (
+        _env("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL")
+        or _env("OTEL_EXPORTER_OTLP_PROTOCOL")
+    ).lower()
     if protocol == "grpc":
         if _OTLPGRPCSpanExporter is not None:
             return _OTLPGRPCSpanExporter()
         logger.warning(
-            "OpenInference plugin: OTEL_EXPORTER_OTLP_PROTOCOL=grpc but the gRPC "
-            "exporter is not installed; falling back to http/protobuf. Install "
+            "OpenInference plugin: OTEL_EXPORTER_OTLP_TRACES_PROTOCOL/"
+            "OTEL_EXPORTER_OTLP_PROTOCOL=grpc but the gRPC exporter is not installed; "
+            "falling back to http/protobuf. Install "
             "opentelemetry-exporter-otlp-proto-grpc to use gRPC."
         )
     if _OTLPHTTPSpanExporter is None:
