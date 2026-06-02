@@ -680,6 +680,7 @@ def on_pre_api_request(*, task_id: str = "", session_id: str = "", platform: str
 def on_post_api_request(*, task_id: str = "", session_id: str = "", model: str = "",
                         provider: str = "", api_mode: str = "", api_call_count: int = 0,
                         api_duration: float = 0.0, finish_reason: str = "",
+                        response_model: Any = None,
                         usage: Any = None, assistant_message: Any = None,
                         assistant_content_chars: int = 0,
                         assistant_tool_call_count: int = 0, **_: Any) -> None:
@@ -703,6 +704,13 @@ def on_post_api_request(*, task_id: str = "", session_id: str = "", model: str =
         _set(span, OUTPUT_VALUE, _stringify_content(getattr(assistant_message, "content", None)))
         _set(span, OUTPUT_MIME_TYPE, MIME_TYPE_TEXT)
         _set_output_message_attrs(span, LLM_OUTPUT_MESSAGES, assistant_message)
+    if api_duration:
+        _set(span, HERMES_API_DURATION_MS, float(api_duration) * 1000.0)
+    _set(span, HERMES_OUTPUT_CHARS, assistant_content_chars)
+    _set(span, HERMES_OUTPUT_TOOL_CALL_COUNT, assistant_tool_call_count)
+    if response_model:
+        _set(span, HERMES_RESPONSE_MODEL, response_model)
+        _set(span, LLM_MODEL_NAME, response_model)
     _end_span(span)
 
     message_tool_calls = (

@@ -531,6 +531,44 @@ class TestSpanShaping:
             "max_tokens": 4096,
         }
 
+    def test_response_side_metadata(self, monkeypatch):
+        _clear_otel_env(monkeypatch)
+        mod = _fresh_plugin()
+        tracer = _install_fake_tracer(mod)
+
+        mod.on_pre_api_request(
+            task_id="task-1",
+            session_id="sess-1",
+            model="glm-5.1",
+            provider="zai",
+            api_mode="chat_completions",
+            api_call_count=1,
+            request_messages=[{"role": "user", "content": "hello"}],
+        )
+
+        class _Msg:
+            content = "done"
+            tool_calls = []
+
+        mod.on_post_api_request(
+            task_id="task-1",
+            session_id="sess-1",
+            api_call_count=1,
+            api_duration=1.25,
+            finish_reason="stop",
+            response_model="glm-5.1-final",
+            assistant_message=_Msg(),
+            assistant_content_chars=4,
+            assistant_tool_call_count=0,
+        )
+
+        llm = tracer.spans[1]
+        assert llm.attributes["hermes.api_duration_ms"] == 1250.0
+        assert llm.attributes["hermes.output_chars"] == 4
+        assert llm.attributes["hermes.output_tool_call_count"] == 0
+        assert llm.attributes["hermes.response_model"] == "glm-5.1-final"
+        assert llm.attributes["llm.model_name"] == "glm-5.1-final"
+
 
 # ---------------------------------------------------------------------------
 # 7. Parenting contract (we hand OTel the right parent handle).
