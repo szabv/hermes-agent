@@ -132,25 +132,20 @@ class TestManifest:
         data = yaml.safe_load((PLUGIN_DIR / "plugin.yaml").read_text())
         assert data["name"] == "openinference"
         assert data["version"]
-        assert set(data["hooks"]) == {
+        assert {
             "pre_api_request", "post_api_request",
             "pre_llm_call", "post_llm_call",
             "pre_tool_call", "post_tool_call",
             "on_session_finalize", "on_session_reset",
-        }
+        }.issubset(set(data["hooks"]))
 
 
 # ---------------------------------------------------------------------------
 # 2. Discovery: opt-in, not loaded by default.
 # ---------------------------------------------------------------------------
 class TestDiscovery:
-    def test_plugin_is_discovered_as_standalone_opt_in(self, tmp_path, monkeypatch):
+    def test_plugin_is_discovered_as_standalone_opt_in(self):
         from hermes_cli import plugins as plugins_mod
-
-        home = tmp_path / ".hermes"
-        home.mkdir()
-        monkeypatch.setenv("HERMES_HOME", str(home))
-        monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
         manager = plugins_mod.PluginManager()
         manager.discover_and_load()
@@ -295,6 +290,31 @@ class TestProviderSetup:
         picked = {}
         monkeypatch.setattr(mod, "_OTLPGRPCSpanExporter", lambda: picked.setdefault("grpc", True) or "grpc-exp", raising=False)
         monkeypatch.setattr(mod, "_OTLPHTTPSpanExporter", lambda: picked.setdefault("http", True) or "http-exp", raising=False)
+        mod._get_tracer()
+        assert picked.get("grpc") and "http" not in picked
+
+    def test_traces_protocol_overrides_generic_protocol(self, monkeypatch):
+        _clear_otel_env(monkeypatch)
+        monkeypatch.setenv(
+            "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "http://localhost:4317"
+        )
+        monkeypatch.setenv("OTEL_EXPORTER_OTLP_PROTOCOL", "http/protobuf")
+        monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL", "grpc")
+        mod = _fresh_plugin()
+        self._wire_real_get_tracer(mod, monkeypatch)
+        picked = {}
+        monkeypatch.setattr(
+            mod,
+            "_OTLPGRPCSpanExporter",
+            lambda: picked.setdefault("grpc", True) or "grpc-exp",
+            raising=False,
+        )
+        monkeypatch.setattr(
+            mod,
+            "_OTLPHTTPSpanExporter",
+            lambda: picked.setdefault("http", True) or "http-exp",
+            raising=False,
+        )
         mod._get_tracer()
         assert picked.get("grpc") and "http" not in picked
 

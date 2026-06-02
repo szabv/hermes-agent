@@ -35,7 +35,7 @@ hermes plugins enable observability/openinference
 
 ## 3. Point it at any OTLP backend (standard OTEL_* vars)
 
-Set these in `~/.hermes/.env` (or your shell). **If no endpoint is set, the plugin
+Set these in `$HERMES_HOME/.env` (or your shell). **If no endpoint is set, the plugin
 stays inert** — there is no default endpoint and no surprise traffic.
 
 | Var | Purpose |
