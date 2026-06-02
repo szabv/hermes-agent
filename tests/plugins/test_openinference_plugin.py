@@ -492,6 +492,45 @@ class TestSpanShaping:
         assert "llm.input_messages.50.message.role" not in llm.attributes
         assert json.loads(llm.attributes["input.value"])[0]["content"] == "5"
 
+    def test_request_side_metadata(self, monkeypatch):
+        _clear_otel_env(monkeypatch)
+        mod = _fresh_plugin()
+        tracer = _install_fake_tracer(mod)
+
+        mod.on_pre_api_request(
+            task_id="task-1",
+            session_id="sess-1",
+            platform="cli",
+            model="glm-5.1",
+            provider="zai",
+            api_mode="chat_completions",
+            api_call_count=1,
+            request_messages=[{"role": "user", "content": "hello"}],
+            user_message="hello",
+            max_tokens=4096,
+            message_count=3,
+            tool_count=12,
+            approx_input_tokens=77,
+            request_char_count=1234,
+        )
+
+        root = tracer.spans[0]
+        llm = tracer.spans[1]
+
+        assert root.attributes["input.value"] == "hello"
+        assert root.attributes["input.mime_type"] == "text/plain"
+        assert llm.attributes["session.id"] == "sess-1"
+        assert llm.attributes["hermes.message_count"] == 3
+        assert llm.attributes["hermes.tool_count"] == 12
+        assert llm.attributes["hermes.approx_input_tokens"] == 77
+        assert llm.attributes["hermes.request_char_count"] == 1234
+
+        invocation = json.loads(llm.attributes["llm.invocation_parameters"])
+        assert invocation == {
+            "api_mode": "chat_completions",
+            "max_tokens": 4096,
+        }
+
 
 # ---------------------------------------------------------------------------
 # 7. Parenting contract (we hand OTel the right parent handle).
