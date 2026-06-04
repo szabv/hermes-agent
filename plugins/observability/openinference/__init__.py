@@ -125,6 +125,16 @@ TOOL_ID = "tool.id"
 MIME_TYPE_JSON = "application/json"
 MIME_TYPE_TEXT = "text/plain"
 
+SESSION_ID = "session.id"
+HERMES_MESSAGE_COUNT = "hermes.message_count"
+HERMES_TOOL_COUNT = "hermes.tool_count"
+HERMES_REQUEST_CHAR_COUNT = "hermes.request_char_count"
+HERMES_APPROX_INPUT_TOKENS = "hermes.approx_input_tokens"
+HERMES_API_DURATION_MS = "hermes.api_duration_ms"
+HERMES_OUTPUT_CHARS = "hermes.output_chars"
+HERMES_OUTPUT_TOOL_CALL_COUNT = "hermes.output_tool_call_count"
+HERMES_RESPONSE_MODEL = "hermes.response_model"
+
 # OpenInference span-kind values.
 KIND_AGENT = "AGENT"
 KIND_LLM = "LLM"
@@ -252,18 +262,22 @@ def _endpoint_configured() -> bool:
 
 
 def _build_exporter() -> Any | None:
-    """Pick the OTLP exporter from OTEL_EXPORTER_OTLP_PROTOCOL.
+    """Pick the OTLP exporter from trace-specific, then generic OTEL protocol.
 
     Defaults to http/protobuf. gRPC is used only when explicitly requested
     *and* the gRPC exporter is installed; otherwise we fall back to HTTP.
     """
-    protocol = _env("OTEL_EXPORTER_OTLP_PROTOCOL").lower()
+    protocol = (
+        _env("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL")
+        or _env("OTEL_EXPORTER_OTLP_PROTOCOL")
+    ).lower()
     if protocol == "grpc":
         if _OTLPGRPCSpanExporter is not None:
             return _OTLPGRPCSpanExporter()
         logger.warning(
-            "OpenInference plugin: OTEL_EXPORTER_OTLP_PROTOCOL=grpc but the gRPC "
-            "exporter is not installed; falling back to http/protobuf. Install "
+            "OpenInference plugin: OTEL_EXPORTER_OTLP_TRACES_PROTOCOL/"
+            "OTEL_EXPORTER_OTLP_PROTOCOL=grpc but the gRPC exporter is not installed; "
+            "falling back to http/protobuf. Install "
             "opentelemetry-exporter-otlp-proto-grpc to use gRPC."
         )
     if _OTLPHTTPSpanExporter is None:
@@ -559,7 +573,7 @@ def _sweep_close_state(state: TraceState, *, error: str | None = None) -> None:
 def _start_root(task_key: str, *, task_id: str, session_id: str, platform: str) -> TraceState:
     attrs: dict[str, Any] = {}
     if session_id:
-        attrs["session.id"] = session_id
+        attrs[SESSION_ID] = session_id
     if platform:
         attrs["hermes.platform"] = platform
     if task_id:
@@ -595,7 +609,10 @@ def on_pre_api_request(*, task_id: str = "", session_id: str = "", platform: str
                        model: str = "", provider: str = "", base_url: str = "",
                        api_mode: str = "", api_call_count: int = 0,
                        request_messages: Any = None, max_tokens: Any = None,
-                       tool_count: int = 0, **_: Any) -> None:
+                       tool_count: int = 0, message_count: int = 0,
+                       approx_input_tokens: int = 0,
+                       request_char_count: int = 0,
+                       user_message: Any = None, **_: Any) -> None:
     if _get_tracer() is None:
         return
     task_key = _trace_key(task_id, session_id)
@@ -603,6 +620,7 @@ def on_pre_api_request(*, task_id: str = "", session_id: str = "", platform: str
 
     span = None
     retry_span = None
+    root_span = None
     retry_count = 0
     stale_states: list[TraceState] = []
     with _STATE_LOCK:
@@ -613,6 +631,7 @@ def on_pre_api_request(*, task_id: str = "", session_id: str = "", platform: str
             state = _start_root(task_key, task_id=task_id, session_id=session_id, platform=platform)
             _TRACE_STATE[task_key] = state
         state.last_updated_at = now
+        root_span = state.root_span
 
         existing = state.llm_spans.get(req_key)
         if existing is not None:
@@ -632,6 +651,10 @@ def on_pre_api_request(*, task_id: str = "", session_id: str = "", platform: str
     for stale_state in stale_states:
         _sweep_close_state(stale_state)
 
+    if user_message is not None:
+        _set(root_span, INPUT_VALUE, _stringify_content(user_message))
+        _set(root_span, INPUT_MIME_TYPE, MIME_TYPE_TEXT)
+
     if retry_span is not None:
         _set(retry_span, LLM_RETRY_COUNT, retry_count)
         return
@@ -642,6 +665,11 @@ def on_pre_api_request(*, task_id: str = "", session_id: str = "", platform: str
     _set(span, LLM_MODEL_NAME, model)
     _set(span, LLM_PROVIDER, provider)
     _set(span, LLM_SYSTEM, provider)
+    _set(span, SESSION_ID, session_id)
+    _set(span, HERMES_MESSAGE_COUNT, message_count)
+    _set(span, HERMES_TOOL_COUNT, tool_count)
+    _set(span, HERMES_APPROX_INPUT_TOKENS, approx_input_tokens)
+    _set(span, HERMES_REQUEST_CHAR_COUNT, request_char_count)
     invocation: dict[str, Any] = {"api_mode": api_mode}
     if max_tokens is not None:
         invocation["max_tokens"] = max_tokens
@@ -656,6 +684,7 @@ def on_pre_api_request(*, task_id: str = "", session_id: str = "", platform: str
 def on_post_api_request(*, task_id: str = "", session_id: str = "", model: str = "",
                         provider: str = "", api_mode: str = "", api_call_count: int = 0,
                         api_duration: float = 0.0, finish_reason: str = "",
+                        response_model: Any = None,
                         usage: Any = None, assistant_message: Any = None,
                         assistant_content_chars: int = 0,
                         assistant_tool_call_count: int = 0, **_: Any) -> None:
@@ -679,6 +708,13 @@ def on_post_api_request(*, task_id: str = "", session_id: str = "", model: str =
         _set(span, OUTPUT_VALUE, _stringify_content(getattr(assistant_message, "content", None)))
         _set(span, OUTPUT_MIME_TYPE, MIME_TYPE_TEXT)
         _set_output_message_attrs(span, LLM_OUTPUT_MESSAGES, assistant_message)
+    if api_duration:
+        _set(span, HERMES_API_DURATION_MS, float(api_duration) * 1000.0)
+    _set(span, HERMES_OUTPUT_CHARS, assistant_content_chars)
+    _set(span, HERMES_OUTPUT_TOOL_CALL_COUNT, assistant_tool_call_count)
+    if response_model:
+        _set(span, HERMES_RESPONSE_MODEL, response_model)
+        _set(span, LLM_MODEL_NAME, response_model)
     _end_span(span)
 
     message_tool_calls = (
@@ -706,7 +742,10 @@ def on_pre_tool_call(*, tool_name: str = "", args: Any = None, task_id: str = ""
         if state is None:
             return
         state.last_updated_at = time.time()
+        effective_session_id = session_id or state.session_id
         attrs: dict[str, Any] = {TOOL_NAME: tool_name}
+        if effective_session_id:
+            attrs[SESSION_ID] = effective_session_id
         span = _start_span(
             f"hermes.tool.{tool_name}",
             parent=state.root_span,

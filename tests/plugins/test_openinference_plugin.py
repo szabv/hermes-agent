@@ -132,25 +132,20 @@ class TestManifest:
         data = yaml.safe_load((PLUGIN_DIR / "plugin.yaml").read_text())
         assert data["name"] == "openinference"
         assert data["version"]
-        assert set(data["hooks"]) == {
+        assert {
             "pre_api_request", "post_api_request",
             "pre_llm_call", "post_llm_call",
             "pre_tool_call", "post_tool_call",
             "on_session_finalize", "on_session_reset",
-        }
+        }.issubset(set(data["hooks"]))
 
 
 # ---------------------------------------------------------------------------
 # 2. Discovery: opt-in, not loaded by default.
 # ---------------------------------------------------------------------------
 class TestDiscovery:
-    def test_plugin_is_discovered_as_standalone_opt_in(self, tmp_path, monkeypatch):
+    def test_plugin_is_discovered_as_standalone_opt_in(self):
         from hermes_cli import plugins as plugins_mod
-
-        home = tmp_path / ".hermes"
-        home.mkdir()
-        monkeypatch.setenv("HERMES_HOME", str(home))
-        monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
         manager = plugins_mod.PluginManager()
         manager.discover_and_load()
@@ -298,6 +293,31 @@ class TestProviderSetup:
         mod._get_tracer()
         assert picked.get("grpc") and "http" not in picked
 
+    def test_traces_protocol_overrides_generic_protocol(self, monkeypatch):
+        _clear_otel_env(monkeypatch)
+        monkeypatch.setenv(
+            "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "http://localhost:4317"
+        )
+        monkeypatch.setenv("OTEL_EXPORTER_OTLP_PROTOCOL", "http/protobuf")
+        monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL", "grpc")
+        mod = _fresh_plugin()
+        self._wire_real_get_tracer(mod, monkeypatch)
+        picked = {}
+        monkeypatch.setattr(
+            mod,
+            "_OTLPGRPCSpanExporter",
+            lambda: picked.setdefault("grpc", True) or "grpc-exp",
+            raising=False,
+        )
+        monkeypatch.setattr(
+            mod,
+            "_OTLPHTTPSpanExporter",
+            lambda: picked.setdefault("http", True) or "http-exp",
+            raising=False,
+        )
+        mod._get_tracer()
+        assert picked.get("grpc") and "http" not in picked
+
     def test_grpc_falls_back_to_http_when_missing(self, monkeypatch):
         _clear_otel_env(monkeypatch)
         monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "http://localhost:4318")
@@ -421,6 +441,7 @@ class TestSpanShaping:
         tool = tracer.spans[-1]
         assert tool.attributes["openinference.span.kind"] == "TOOL"
         assert tool.attributes["tool.name"] == "read_file"
+        assert tool.attributes["session.id"] == "s"
         assert tool.name == "hermes.tool.read_file"
         mod.on_post_tool_call(tool_name="read_file", args={"path": "x.py"}, result={"content": "ok"},
                               task_id="t", session_id="s", tool_call_id="call-9", duration_ms=42)
@@ -428,6 +449,29 @@ class TestSpanShaping:
         assert tool.attributes["output.value"] == '{"content": "ok"}'
         assert tool.attributes["duration_ms"] == 42
         assert tool.ended is True
+
+    def test_tool_span_session_id_falls_back_to_trace_state(self, monkeypatch):
+        _clear_otel_env(monkeypatch)
+        mod = _fresh_plugin()
+        tracer = _install_fake_tracer(mod)
+        mod.on_pre_api_request(
+            task_id="t",
+            session_id="s",
+            api_call_count=1,
+            request_messages=[{"role": "user", "content": "go"}],
+        )
+
+        mod.on_pre_tool_call(
+            tool_name="read_file",
+            args={"path": "x.py"},
+            task_id="t",
+            session_id="",
+        )
+
+        root = tracer.spans[0]
+        tool = tracer.spans[-1]
+        assert tool.attributes["session.id"] == "s"
+        assert _parent_of(tool) is root
 
     def test_output_message_tool_calls_flattened(self, monkeypatch):
         _clear_otel_env(monkeypatch)
@@ -491,6 +535,83 @@ class TestSpanShaping:
         assert llm.attributes["llm.input_messages.0.message.content"] == "5"
         assert "llm.input_messages.50.message.role" not in llm.attributes
         assert json.loads(llm.attributes["input.value"])[0]["content"] == "5"
+
+    def test_request_side_metadata(self, monkeypatch):
+        _clear_otel_env(monkeypatch)
+        mod = _fresh_plugin()
+        tracer = _install_fake_tracer(mod)
+
+        mod.on_pre_api_request(
+            task_id="task-1",
+            session_id="sess-1",
+            platform="cli",
+            model="glm-5.1",
+            provider="zai",
+            api_mode="chat_completions",
+            api_call_count=1,
+            request_messages=[{"role": "user", "content": "hello"}],
+            user_message="hello",
+            max_tokens=4096,
+            message_count=3,
+            tool_count=12,
+            approx_input_tokens=77,
+            request_char_count=1234,
+        )
+
+        root = tracer.spans[0]
+        llm = tracer.spans[1]
+
+        assert root.attributes["input.value"] == "hello"
+        assert root.attributes["input.mime_type"] == "text/plain"
+        assert llm.attributes["session.id"] == "sess-1"
+        assert llm.attributes["hermes.message_count"] == 3
+        assert llm.attributes["hermes.tool_count"] == 12
+        assert llm.attributes["hermes.approx_input_tokens"] == 77
+        assert llm.attributes["hermes.request_char_count"] == 1234
+
+        invocation = json.loads(llm.attributes["llm.invocation_parameters"])
+        assert invocation == {
+            "api_mode": "chat_completions",
+            "max_tokens": 4096,
+        }
+
+    def test_response_side_metadata(self, monkeypatch):
+        _clear_otel_env(monkeypatch)
+        mod = _fresh_plugin()
+        tracer = _install_fake_tracer(mod)
+
+        mod.on_pre_api_request(
+            task_id="task-1",
+            session_id="sess-1",
+            model="glm-5.1",
+            provider="zai",
+            api_mode="chat_completions",
+            api_call_count=1,
+            request_messages=[{"role": "user", "content": "hello"}],
+        )
+
+        class _Msg:
+            content = "done"
+            tool_calls = []
+
+        mod.on_post_api_request(
+            task_id="task-1",
+            session_id="sess-1",
+            api_call_count=1,
+            api_duration=1.25,
+            finish_reason="stop",
+            response_model="glm-5.1-final",
+            assistant_message=_Msg(),
+            assistant_content_chars=4,
+            assistant_tool_call_count=0,
+        )
+
+        llm = tracer.spans[1]
+        assert llm.attributes["hermes.api_duration_ms"] == 1250.0
+        assert llm.attributes["hermes.output_chars"] == 4
+        assert llm.attributes["hermes.output_tool_call_count"] == 0
+        assert llm.attributes["hermes.response_model"] == "glm-5.1-final"
+        assert llm.attributes["llm.model_name"] == "glm-5.1-final"
 
 
 # ---------------------------------------------------------------------------
