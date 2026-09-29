@@ -357,6 +357,51 @@ class HonchoSessionManager:
 
         return self._session_key_fallback_peer_id(key)
 
+    _TRANSIENT_CONTEXT_RE = re.compile(
+        r"^(?:\[CONTEXT COMPACTION\b|\[System note:\b|<memory-context>\b)",
+        re.IGNORECASE,
+    )
+
+    @classmethod
+    def _is_transient_context_message(cls, content: str) -> bool:
+        """Return True for injected bookkeeping, not user-authored durable signal."""
+        return bool(cls._TRANSIENT_CONTEXT_RE.match((content or "").lstrip()))
+
+    @classmethod
+    def _message_reasoning_enabled(cls, role: str, content: str) -> bool:
+        """Apply Hermes stream-memory policy at Honcho message ingestion.
+
+        Assistant turns are persisted for transcript continuity but excluded
+        from Honcho reasoning so assistant self-narration does not become
+        durable user memory. User-visible injected context/system notes are
+        also excluded; real user messages remain reasoned over.
+        """
+        if role == "assistant":
+            return False
+        if cls._is_transient_context_message(content):
+            return False
+        return True
+
+    @classmethod
+    def _message_configuration(cls, role: str, content: str) -> dict[str, Any]:
+        """Return Honcho per-message reasoning configuration."""
+        return {"reasoning": {"enabled": cls._message_reasoning_enabled(role, content)}}
+
+    @classmethod
+    def _message_metadata(cls, role: str, content: str) -> dict[str, object]:
+        """Attach source metadata explaining the stream-memory write gate."""
+        if role == "assistant":
+            policy = "assistant_self_history_suppressed"
+        elif cls._is_transient_context_message(content):
+            policy = "transient_context_suppressed"
+        else:
+            policy = "stream_taxonomy_user_signal"
+        return {
+            "source": "hermes",
+            "role": role,
+            "stream_memory_policy": policy,
+        }
+
     def get_or_create(self, key: str) -> HonchoSession:
         """
         Get an existing session or create a new one.
@@ -436,8 +481,16 @@ class HonchoSessionManager:
 
         honcho_messages = []
         for msg in new_messages:
-            peer = user_peer if msg["role"] == "user" else assistant_peer
-            honcho_messages.append(peer.message(msg["content"]))
+            role = msg["role"]
+            content = msg["content"]
+            peer = user_peer if role == "user" else assistant_peer
+            honcho_messages.append(
+                peer.message(
+                    content,
+                    metadata=self._message_metadata(role, content),
+                    configuration=self._message_configuration(role, content),
+                )
+            )
 
         try:
             honcho_session.add_messages(honcho_messages)

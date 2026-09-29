@@ -184,6 +184,16 @@ CONCLUDE_SCHEMA = {
 ALL_TOOL_SCHEMAS = [PROFILE_SCHEMA, SEARCH_SCHEMA, REASONING_SCHEMA, CONTEXT_SCHEMA, CONCLUDE_SCHEMA]
 
 
+STREAM_MEMORY_POLICY = """Honcho memory policy:
+- Treat the stream taxonomy as the write/retrieval gate. Preserve only: insights, decisions, failures, references, notable context, and external-actor calls that affect future work.
+- Log meaning, not mechanics. Keep mechanics only when they are the durable memory: reproduction steps, failure sequence, exact procedure, or investigation method.
+- Do not treat assistant narration as durable fact. Suppress self-history such as "Hermes said/thinks/recommends/verified/ran/used/loaded" unless the durable point is a user decision, a failure, an insight, or a canonical reference.
+- Do not infer active work from routine status checks, queue state, smoke-test trivia, model/debug chatter, turn bookkeeping, unchanged reexamination, jokes/style notes, or duplicated spec content.
+- For active work, prefer source-backed references to canonical artifacts. If the source of truth is Kanban, vault, a repo file, an issue folder, or an experiment artifact, point to that instead of inventing status from transcript residue.
+- If the evidence does not establish a current task, say that the active task is unknown rather than guessing.
+- Use dry, concise English."""
+
+
 # ---------------------------------------------------------------------------
 # MemoryProvider implementation
 # ---------------------------------------------------------------------------
@@ -410,8 +420,12 @@ class HonchoMemoryProvider(MemoryProvider):
                 logger.debug("Honcho context prewarm failed: %s", e)
 
             _prewarm_query = (
-                "Summarize what you know about this user. "
-                "Focus on preferences, current projects, and working style."
+                f"{STREAM_MEMORY_POLICY}\n\n"
+                "Summarize what you know about this user. Focus on durable "
+                "preferences, source-backed active context, and working style. "
+                "For active work, include only stream-worthy items backed by "
+                "insights, decisions, failures, references, notable context, or "
+                "external-actor calls. If current work is not established, say so."
             )
 
             def _prewarm_dialectic() -> None:
@@ -541,7 +555,7 @@ class HonchoMemoryProvider(MemoryProvider):
                 "honcho_conclude to save facts about the user."
             )
 
-        return header
+        return f"{header}\n\n{STREAM_MEMORY_POLICY}"
 
     def prefetch(self, query: str, *, session_id: str = "") -> str:
         """Return base context (representation + card) plus dialectic supplement.
@@ -678,11 +692,44 @@ class HonchoMemoryProvider(MemoryProvider):
             return ""
 
         result = "\n\n".join(parts)
+        result = self._filter_stream_memory_context(result)
 
         # ----- Port #3265: token budget enforcement -----
         result = self._truncate_to_budget(result)
 
         return result
+
+    _STREAM_JUNK_LINE_RE = re.compile(
+        r"(\bHermes\s+(?:said|says|thinks|believes|recommends|suggests|offered|would|will|did|verified|checked|ran|used|loaded)\b"
+        r"|\bassistant\s+(?:said|says|thinks|believes|recommends|suggests|offered|would|will|did|verified|checked|ran|used|loaded)\b"
+        r"|\b(?:routine status check|queue state|smoke[- ]test trivia|model/debug chatter|session bookkeeping|unchanged reexamination)\b"
+        r"|\b(?:cute|playful|joke|humou?r|flair)\b)",
+        re.IGNORECASE,
+    )
+
+    @classmethod
+    def _filter_stream_memory_context(cls, text: str) -> str:
+        """Drop high-confidence Honcho sludge before auto-injection.
+
+        This is intentionally conservative: prompts enforce the stream taxonomy,
+        while this deterministic pass catches the recurring self-history/style
+        lines that caused bad active-work recall.
+        """
+        if not text:
+            return ""
+
+        kept: list[str] = []
+        dropped_any = False
+        for line in text.splitlines():
+            if cls._STREAM_JUNK_LINE_RE.search(line):
+                dropped_any = True
+                continue
+            kept.append(line)
+
+        filtered = "\n".join(kept).strip()
+        if dropped_any and filtered:
+            logger.debug("Honcho stream-memory filter removed high-confidence sludge lines")
+        return filtered
 
     def _truncate_to_budget(self, text: str) -> str:
         """Truncate text to fit within context_tokens budget if set."""
@@ -893,36 +940,45 @@ class HonchoMemoryProvider(MemoryProvider):
         Pass 1: self-audit / targeted synthesis against gaps from pass 0.
         Pass 2: reconciliation / contradiction check across prior passes.
         """
+        policy = STREAM_MEMORY_POLICY
         if pass_idx == 0:
             if is_cold:
                 return (
-                    "Who is this person? What are their preferences, goals, "
-                    "and working style? Focus on facts that would help an AI "
-                    "assistant be immediately useful."
+                    f"{policy}\n\n"
+                    "Who is this person? What are their durable preferences, "
+                    "source-backed goals, and working style? Focus on facts that "
+                    "would help an AI assistant be immediately useful. Do not infer "
+                    "active work from transcript residue; if it is not source-backed, "
+                    "say it is unknown."
                 )
             return (
-                "Given what's been discussed in this session so far, what "
-                "context about this user is most relevant to the current "
-                "conversation? Prioritize active context over biographical facts."
+                f"{policy}\n\n"
+                "Given what's been discussed in this session so far, what context "
+                "about this user is most relevant to the current conversation? "
+                "Prioritize stream-worthy active context over biographical facts. "
+                "Only include active work if it is grounded in insights, decisions, "
+                "failures, references, notable context, or external-actor calls."
             )
         elif pass_idx == 1:
             prior = prior_results[-1] if prior_results else ""
             return (
+                f"{policy}\n\n"
                 f"Given this initial assessment:\n\n{prior}\n\n"
-                "What gaps remain in your understanding that would help "
-                "going forward? Synthesize what you actually know about "
-                "the user's current state and immediate needs, grounded "
-                "in evidence from recent sessions."
+                "Audit it against the stream taxonomy. Remove assistant self-history, "
+                "routine mechanics, queue/model/debug chatter, and unsupported current-task "
+                "claims. Synthesize only what is actually known about the user's current "
+                "state and immediate needs, grounded in evidence from recent sessions."
             )
         else:
             # pass 2: reconciliation
             return (
+                f"{policy}\n\n"
                 f"Prior passes produced:\n\n"
                 f"Pass 1:\n{prior_results[0] if len(prior_results) > 0 else '(empty)'}\n\n"
                 f"Pass 2:\n{prior_results[1] if len(prior_results) > 1 else '(empty)'}\n\n"
-                "Do these assessments cohere? Reconcile any contradictions "
-                "and produce a final, concise synthesis of what matters most "
-                "for the current conversation."
+                "Reconcile contradictions and produce a final concise synthesis of "
+                "what matters most for the current conversation. Drop anything that "
+                "fails the stream-memory gate or lacks source-backed evidence."
             )
 
     @staticmethod
@@ -1125,6 +1181,8 @@ class HonchoMemoryProvider(MemoryProvider):
         if self._cron_skipped:
             return
         if not self._manager or not self._session_key:
+            return
+        if self._config and not getattr(self._config, "save_messages", True):
             return
 
         msg_limit = self._config.message_max_chars if self._config else 25000
