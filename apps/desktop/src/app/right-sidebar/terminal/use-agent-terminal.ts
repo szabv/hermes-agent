@@ -1,15 +1,22 @@
 import { FitAddon } from '@xterm/addon-fit'
 import { Unicode11Addon } from '@xterm/addon-unicode11'
-import { WebLinksAddon } from '@xterm/addon-web-links'
 import { WebglAddon } from '@xterm/addon-webgl'
 import { Terminal } from '@xterm/xterm'
 import { useEffect, useRef } from 'react'
 
+import { writeClipboardText } from '@/components/ui/copy-button'
+import { triggerHaptic } from '@/lib/haptics'
 import { useTheme } from '@/themes/context'
 
 import { registerAgentTerminalWriter } from './agent-terminal-stream'
 import { makeTerminalReader, registerTerminalReader } from './buffer'
-import { resolveSurfaceColor, terminalTheme } from './selection'
+import { mirrorSelection, terminalClipboardIntent } from './clipboard'
+import { terminalLinkHandler, terminalWebLinksAddon } from './links'
+import { isMacPlatform, resolveSurfaceColor, terminalTheme } from './selection'
+import { registerTerminalContextMenu } from './terminal-context-menu'
+import { prepareTerminalFontFamily } from './terminal-font'
+import { redrawAllTerminals, registerWebglRefresh } from './terminals'
+import { useTerminalFontController } from './use-terminal-font'
 
 // Read-only terminal for an agent background process: a write-only xterm (no PTY,
 // no input) fed live by the backend output stream, keyed by process id. Shares
@@ -20,14 +27,20 @@ export function useAgentTerminal({ active, id, procId }: { active: boolean; id: 
   const termRef = useRef<Terminal | null>(null)
   const webglRef = useRef<WebglAddon | null>(null)
   const fitRef = useRef<(() => void) | null>(null)
+  const { latestFontFamilyRef, mountedRef } = useTerminalFontController({ fitRef, termRef, webglRef })
 
   const surfaceTheme = () => {
     const ansi = renderedMode === 'dark' ? (theme.darkTerminal ?? theme.terminal) : theme.terminal
-    const surface = resolveSurfaceColor('#ffffff')
+    const base = terminalTheme(renderedMode, ansi)
+    // Fall back to the palette's own background, not white — a hardcoded
+    // '#ffffff' flashes a white slab in dark mode whenever the probe can't read
+    // the token (pre-paint mount). Same contract as the user terminal.
+    const surface = resolveSurfaceColor(base.background ?? '#ffffff')
 
-    return { ...terminalTheme(renderedMode, ansi), background: surface, cursorAccent: surface }
+    return { ...base, background: surface, cursorAccent: surface }
   }
 
+  // eslint-disable-next-line no-restricted-syntax -- legitimate non-atom ref write (see eslint rule comment)
   useEffect(() => {
     const host = hostRef.current
 
@@ -35,18 +48,26 @@ export function useAgentTerminal({ active, id, procId }: { active: boolean; id: 
       return
     }
 
+    let disposed = false
+    let observer: ResizeObserver | null = null
+
+    let unregister = () => {}
+
+    let unregisterReader = () => {}
+
     const term = new Terminal({
       allowProposedApi: true,
       allowTransparency: false,
       convertEol: true,
       cursorBlink: false,
       disableStdin: true,
-      fontFamily: "'JetBrains Mono', 'Cascadia Code', 'SF Mono', Menlo, Consolas, monospace",
+      fontFamily: latestFontFamilyRef.current,
       fontSize: 11,
       fontWeight: 'normal',
       fontWeightBold: 'bold',
       letterSpacing: 0,
       lineHeight: 1.12,
+      linkHandler: terminalLinkHandler,
       minimumContrastRatio: 4.5,
       scrollback: 1000,
       theme: surfaceTheme()
@@ -55,10 +76,44 @@ export function useAgentTerminal({ active, id, procId }: { active: boolean; id: 
     const fit = new FitAddon()
     term.loadAddon(fit)
     term.loadAddon(new Unicode11Addon())
-    term.loadAddon(new WebLinksAddon())
+    term.loadAddon(terminalWebLinksAddon())
     term.unicode.activeVersion = '11'
-    term.open(host)
-    termRef.current = term
+
+    // Read-only mirror, but the output is exactly what people want to copy.
+    // No paste path: this terminal has no PTY to paste into.
+    const selectionDisposable = term.onSelectionChange(() => mirrorSelection(host, term.getSelection()))
+
+    // Right-clicks resolve through the app context menu; the handle carries
+    // the xterm selection the DOM resolver cannot see. paste stays null —
+    // there is nothing to paste into. reload swallows the chord for the same
+    // reason: no PTY, and focus being here must still stop the app-level
+    // Ctrl/Cmd+R reload fallback.
+    const contextMenuDisposable = registerTerminalContextMenu(host, {
+      getSelection: () => term.getSelection(),
+      paste: null,
+      reload: () => {},
+      selectAll: () => term.selectAll()
+    })
+
+    term.attachCustomKeyEventHandler(event => {
+      const intent = terminalClipboardIntent(event, {
+        hasSelection: Boolean(term.getSelection()),
+        isMac: isMacPlatform()
+      })
+
+      if (intent !== 'copy') {
+        return true
+      }
+
+      event.preventDefault()
+      void writeClipboardText(term.getSelection()).catch(() => {
+        // Clipboard unavailable — leave the selection so the user can retry.
+      })
+      term.clearSelection()
+      triggerHaptic('selection')
+
+      return false
+    })
 
     fitRef.current = () => {
       if (host.clientWidth > 0 && host.clientHeight > 0) {
@@ -70,30 +125,72 @@ export function useAgentTerminal({ active, id, procId }: { active: boolean; id: 
       }
     }
 
-    try {
-      const webgl = new WebglAddon()
-      webgl.onContextLoss(() => {
-        webgl.dispose()
-        webglRef.current = null
-      })
-      term.loadAddon(webgl)
-      webglRef.current = webgl
-    } catch {
-      // No WebGL — xterm falls back to the DOM renderer.
+    const mount = () => {
+      if (disposed || !host.isConnected) {
+        return
+      }
+
+      term.open(host)
+      termRef.current = term
+      mountedRef.current = true
+
+      try {
+        const webgl = new WebglAddon()
+        webgl.onContextLoss(() => {
+          webgl.dispose()
+          webglRef.current = null
+
+          // Same as the user terminal: repaint the buffered rows with the DOM
+          // renderer so the viewport doesn't stay black after a context loss.
+          try {
+            fitRef.current?.()
+            term.refresh(0, term.rows - 1)
+          } catch {
+            // Best-effort repaint; the next resize repaints anyway.
+          }
+        })
+        term.loadAddon(webgl)
+        webglRef.current = webgl
+      } catch {
+        // No WebGL — xterm falls back to the DOM renderer.
+      }
+
+      fitRef.current?.()
+      observer = new ResizeObserver(() => fitRef.current?.())
+      observer.observe(host)
+
+      // Stream live output straight into the terminal (replays backlog on attach).
+      unregister = registerAgentTerminalWriter(procId, chunk => term.write(chunk))
+      unregisterReader = registerTerminalReader(id, makeTerminalReader(term))
     }
 
-    fitRef.current()
-    const observer = new ResizeObserver(() => fitRef.current?.())
-    observer.observe(host)
+    // Join the shared-atlas refresh fan-out (see redrawAllTerminals in
+    // terminals.ts): clearing this terminal's atlas mutates texture pages the
+    // user terminals draw from, so they must rebuild their models too.
+    const unregisterWebglRefresh = registerWebglRefresh(term, () => webglRef.current)
 
-    // Stream live output straight into the terminal (replays backlog on attach).
-    const unregister = registerAgentTerminalWriter(procId, chunk => term.write(chunk))
-    const unregisterReader = registerTerminalReader(id, makeTerminalReader(term))
+    void prepareTerminalFontFamily(
+      () => latestFontFamilyRef.current,
+      () => !disposed && host.isConnected
+    ).then(fontFamily => {
+      if (!fontFamily) {
+        return
+      }
+
+      term.options.fontFamily = fontFamily
+      mount()
+    })
 
     return () => {
+      disposed = true
+      mountedRef.current = false
       unregister()
       unregisterReader()
-      observer.disconnect()
+      unregisterWebglRefresh()
+      selectionDisposable.dispose()
+      contextMenuDisposable()
+      observer?.disconnect()
+      fitRef.current = null
       term.dispose()
       termRef.current = null
       webglRef.current = null
@@ -110,7 +207,9 @@ export function useAgentTerminal({ active, id, procId }: { active: boolean; id: 
 
     const raf = requestAnimationFrame(() => {
       term.options.theme = surfaceTheme()
-      webglRef.current?.clearTextureAtlas()
+      // The atlas is shared across every terminal with the same render config,
+      // so the clear must fan out to the siblings too (see redrawAllTerminals).
+      redrawAllTerminals()
     })
 
     return () => cancelAnimationFrame(raf)
@@ -127,8 +226,7 @@ export function useAgentTerminal({ active, id, procId }: { active: boolean; id: 
       const term = termRef.current
 
       fitRef.current?.()
-      webglRef.current?.clearTextureAtlas()
-      term?.refresh(0, term.rows - 1)
+      redrawAllTerminals()
       // Take focus on activation (parity with the user terminal) so the active
       // agent tab holds focus and ⌘W's isFocusWithin('[data-terminal]') routes
       // the close to this tab rather than to a preview.
