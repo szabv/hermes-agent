@@ -1623,9 +1623,9 @@ def check_respawn_guard(
     #    An explicit config opt-out permits operators to resume work on that PR
     #    without disabling success, auth, or infrastructure guards above.
     try:
-        from hermes_cli.config import load_config
+        from hermes_cli.config import load_config_readonly
         pr_guard_enabled = (
-            (load_config().get("kanban") or {}).get("pr_comment_respawn_guard", True)
+            (load_config_readonly().get("kanban") or {}).get("pr_comment_respawn_guard", True)
             is not False
         )
     except Exception:
