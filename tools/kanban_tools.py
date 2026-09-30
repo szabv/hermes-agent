@@ -8,11 +8,13 @@ shlex quoting of JSON metadata, structured-JSON failures). Humans use CLI/dashbo
 from __future__ import annotations
 
 import functools
+import importlib.util
 import json
 import logging
 import os
 import time
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Any, Callable, Optional
 
 from agent.redact import redact_sensitive_text
@@ -23,6 +25,7 @@ from tools.kanban_tools_schemas import (
     KANBAN_ATTACH_SCHEMA,
     KANBAN_ATTACH_URL_SCHEMA, KANBAN_ATTACHMENTS_SCHEMA, KANBAN_BLOCK_SCHEMA, KANBAN_COMMENT_SCHEMA,
     KANBAN_COMPLETE_SCHEMA, KANBAN_CREATE_SCHEMA, KANBAN_HEARTBEAT_SCHEMA, KANBAN_LINK_SCHEMA,
+    KANBAN_CLAIM_CHECK_SCHEMA,
     KANBAN_LIST_SCHEMA, KANBAN_REQUEST_CHANGES_SCHEMA, KANBAN_REQUEST_REVIEW_SCHEMA,
     KANBAN_SHOW_SCHEMA, KANBAN_UNBLOCK_SCHEMA)
 
@@ -326,6 +329,39 @@ def _redact(value: Any) -> str:
 
 def _redact_opt(value: Any) -> Any:
     return _redact(value) if value else value
+
+def _load_claim_gate():
+    """Load the installed profile's issue-to-PR gate, never a caller-supplied script."""
+    from hermes_constants import get_hermes_home
+    script = (Path(get_hermes_home()) / "skills" / "software-development" /
+              "issue-to-pr" / "scripts" / "claim_gate.py")
+    spec = importlib.util.spec_from_file_location("issue_to_pr_claim_gate", script)
+    if spec is None or spec.loader is None:
+        raise ValueError("installed issue-to-pr claim gate is unavailable")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+@_kanban_handler("kanban_claim_check")
+def _handle_claim_check(args: dict, **kw) -> str:
+    """Evaluate this attempt in-process so terminal descendants remain fenced."""
+    from agent.delegation_context import is_dispatcher_owned_worker_context
+    _check(is_dispatcher_owned_worker_context(), "claim check requires dispatcher-owned worker context")
+    task_id = (os.environ.get("HERMES_KANBAN_TASK") or "").strip()
+    board = (os.environ.get("HERMES_KANBAN_BOARD") or "").strip()
+    run_id = (os.environ.get("HERMES_KANBAN_RUN_ID") or "").strip()
+    _check(task_id and board and run_id.isdecimal(), "claim check requires pinned task, board, and numeric run")
+    _check(not args.get("board") or args["board"] == board,
+           "claim check cannot target a different board")
+    for field in ("run_folder", "repo_path", "canonical_issue"):
+        _check(isinstance(args.get(field), str) and Path(args[field]).is_absolute(),
+               f"claim check requires absolute {field}")
+    gate = _load_claim_gate()
+    try:
+        return json.dumps(gate.check_claim(board, task_id, args["run_folder"],
+                                           args["repo_path"], args["canonical_issue"]), sort_keys=True)
+    except (gate.ClaimBlocked, OSError, ValueError, KeyError, TypeError) as exc:
+        return json.dumps({"action": "blocked", "reason": str(exc)})
 
 
 def _redact_metadata(metadata: dict) -> Optional[dict]:
@@ -1202,6 +1238,7 @@ def _handle_link(args: dict, **kw) -> str:
 _ORCHESTRATOR_TOOLS = frozenset({"kanban_list", "kanban_unblock"})
 _TOOLS = (
     ("kanban_show", KANBAN_SHOW_SCHEMA, _handle_show, "📋"),
+    ("kanban_claim_check", KANBAN_CLAIM_CHECK_SCHEMA, _handle_claim_check, "🔒"),
     ("kanban_list", KANBAN_LIST_SCHEMA, _handle_list, "📋"),
     ("kanban_complete", KANBAN_COMPLETE_SCHEMA, _handle_complete, "✔"),
     ("kanban_block", KANBAN_BLOCK_SCHEMA, _handle_block, "⏸"),

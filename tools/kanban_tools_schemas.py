@@ -56,6 +56,19 @@ KANBAN_SHOW_SCHEMA = _schema(
     [],
 )
 
+KANBAN_CLAIM_CHECK_SCHEMA = _schema(
+    "kanban_claim_check",
+    "Read-only issue-to-PR claim decision for this dispatcher-owned worker attempt. "
+    "Call before changing issue files or dispatching specialists. Returns fresh, resume, "
+    "or blocked; never grants a terminal subprocess the worker's identity.",
+    {
+        "run_folder": _prop("string", "Absolute existing issue run folder bound to this card."),
+        "repo_path": _prop("string", "Absolute repository root bound to this card."),
+        "canonical_issue": _prop("string", "Absolute canonical issue path bound to this card."),
+    },
+    ["run_folder", "repo_path", "canonical_issue"],
+)
+
 KANBAN_LIST_SCHEMA = _schema(
     "kanban_list",
     (
