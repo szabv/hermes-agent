@@ -1620,6 +1620,18 @@ def check_respawn_guard(
             return "recent_success"
 
     # 4. GitHub PR URL in a recent comment — prior worker already opened a PR.
+    #    An explicit config opt-out permits operators to resume work on that PR
+    #    without disabling success, auth, or infrastructure guards above.
+    try:
+        from hermes_cli.config import load_config
+        pr_guard_enabled = (
+            (load_config().get("kanban") or {}).get("pr_comment_respawn_guard", True)
+            is not False
+        )
+    except Exception:
+        pr_guard_enabled = True
+    if not pr_guard_enabled:
+        return None
     #    Exception: a handoff AFTER the newest PR comment (operator reassign,
     #    reviewer changes_requested, review reopen) names the profile that must
     #    now work on THAT PR — a closer or the implementer finishing it, not a
