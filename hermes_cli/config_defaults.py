@@ -1895,6 +1895,9 @@ DEFAULT_CONFIG = {
         "review_dispatch": True,
         # Seconds between dispatcher ticks. Lower = snappier pickup; higher = less SQL pressure.
         "dispatch_interval_seconds": 60,
+        # Hold ready tasks with a recent PR URL in a comment to avoid duplicate PRs.
+        # Set false to resume work on existing PRs; all other respawn guards stay active.
+        "pr_comment_respawn_guard": True,
         # Auto-block after this many consecutive non-success attempts (spawn_failed, timed_out,
         # crashed) for the same task/profile. Reassignment resets the streak.
         "failure_limit": 2,

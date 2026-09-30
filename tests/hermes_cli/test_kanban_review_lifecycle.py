@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -481,6 +482,82 @@ def test_active_pr_guard_skipped_for_review_lane_but_defers_ready_lane(
         assert kbd.check_respawn_guard(
             conn, review_id, lane="review"
         ) == "rate_limit_cooldown"
+
+
+def test_pr_comment_guard_can_be_disabled_in_config(
+    kanban_home: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ready card with an open PR can be deliberately re-spawned by the operator."""
+    import hermes_cli.profiles as profmod
+
+    monkeypatch.setattr(profmod, "profile_exists", lambda name: True)
+    (kanban_home / "config.yaml").write_text(
+        "kanban:\n  pr_comment_respawn_guard: false\n", encoding="utf-8",
+    )
+    with kbc.connect() as conn:
+        task_id = kb.create_task(conn, title="resume open PR", assignee="worker")
+        kb.add_comment(
+            conn, task_id, author="worker",
+            body="Continue https://github.com/example/repo/pull/123",
+        )
+        result = kbd.dispatch_once(conn, dry_run=True)
+        assert task_id in [spawned[0] for spawned in result.spawned]
+        assert (task_id, "active_pr") not in result.respawn_guarded
+
+
+def test_disabling_pr_comment_guard_keeps_other_respawn_safeguards(
+    kanban_home: Path,
+) -> None:
+    (kanban_home / "config.yaml").write_text(
+        "kanban:\n  pr_comment_respawn_guard: false\n", encoding="utf-8",
+    )
+    with kbc.connect() as conn:
+        done_id = kb.create_task(conn, title="already finished", assignee="worker")
+        kb.add_comment(
+            conn, done_id, author="worker",
+            body="https://github.com/example/repo/pull/123",
+        )
+        kb.claim_task(conn, done_id)
+        assert kb.complete_task(conn, done_id, summary="done") is True
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status = 'ready' WHERE id = ?", (done_id,))
+        assert kbd.check_respawn_guard(conn, done_id) == "recent_success"
+
+        limited_id = kb.create_task(conn, title="quota wall", assignee="worker")
+        kb.add_comment(
+            conn, limited_id, author="worker",
+            body="https://github.com/example/repo/pull/456",
+        )
+        now = int(time.time())
+        with kb.write_txn(conn):
+            conn.execute(
+                "INSERT INTO task_runs (task_id, profile, status, outcome, "
+                "started_at, ended_at) VALUES (?, 'worker', 'rate_limited', "
+                "'rate_limited', ?, ?)",
+                (limited_id, now, now),
+            )
+        assert kbd.check_respawn_guard(conn, limited_id) == "rate_limit_cooldown"
+
+
+def test_pr_comment_guard_setting_is_scoped_to_dispatcher_home(
+    kanban_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (kanban_home / "config.yaml").write_text(
+        "kanban:\n  pr_comment_respawn_guard: false\n", encoding="utf-8",
+    )
+    with kbc.connect() as conn:
+        task_id = kb.create_task(conn, title="same card", assignee="worker")
+        kb.add_comment(
+            conn, task_id, author="worker",
+            body="https://github.com/example/repo/pull/123",
+        )
+        assert kbd.check_respawn_guard(conn, task_id) is None
+        other_home = tmp_path / "other-home"
+        other_home.mkdir()
+        monkeypatch.setenv("HERMES_HOME", str(other_home))
+        assert kbd.check_respawn_guard(conn, task_id) == "active_pr"
+        monkeypatch.setenv("HERMES_HOME", str(kanban_home))
+        assert kbd.check_respawn_guard(conn, task_id) is None
 
 
 def _backdate_comments(conn, tid, seconds=60):
